@@ -31,4 +31,8 @@ Thumbs.db
 *.log
 
 # Optional: Uncomment to exclude large dataset files
-# dataset/*.csv
+#dataset/*.csv
+old-documentation
+Dockerfile
+pyproject.toml
+requirements.txt
