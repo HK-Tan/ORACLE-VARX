@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
-"""Run VARX experiment on ETF returns with VIX as a tradeable asset.
+"""Run VARX experiment on ETF returns with VIX as exogenous input.
 
-This script runs a VAR model with 10 tradeable assets: 9 sector ETFs + VIX.
+This script runs a VAR model with 10 variables (9 sector ETFs + VIX) but only
+trades the 9 ETFs. VIX is included in the VAR dynamics to help forecast ETF
+returns but is NOT a tradeable asset.
+
 VIX is converted to log returns: ln(VIX_t / VIX_{t-1}) * 100
 
-This differs from OR-VARX which uses VIX as a confounder. Here, VIX is treated
-as a tradeable asset that can be forecasted and traded.
+This differs from:
+- Plain VAR: which doesn't include VIX at all
+- OR-VARX: which orthogonalizes ETF returns with respect to VIX using DML
 
 Steps:
 1. Loads ETF returns + VIX log returns from data files
-2. Runs fit_var() with 10 assets
-3. Converts forecasts to PnL using multiple strategies
-4. Saves results and generates plots
+2. Runs fit_var() with 10 assets (9 ETFs + VIX)
+3. Filters out VIX from forecasts (only 9 ETFs are tradeable)
+4. Converts forecasts to PnL using multiple strategies
+5. Saves results and generates plots
 
 Parameters:
     - lookback_var: 514 days (504 ols_window + 10 p_max_offset via GridConfig)
     - validation_days: 21 days
     - p_max: 10
-    - Assets: 9 ETFs + VIX (10 tradeable assets)
+    - Model assets: 9 ETFs + VIX (10 variables in VAR)
+    - Tradeable assets: 9 ETFs only (VIX excluded from trading)
 """
 
 import sys
@@ -53,7 +59,7 @@ def main(
     experiment_name: str = None,
     show_plots: bool = True,
 ):
-    """Run VARX experiment with VIX as tradeable asset.
+    """Run VARX experiment with VIX as exogenous input (not tradeable).
 
     Args:
         n_days: Number of days to load. If None, loads all available data.
@@ -65,7 +71,7 @@ def main(
         show_plots: Whether to display plots interactively.
     """
     print("=" * 80)
-    print("VARX EXPERIMENT (9 ETFs + VIX as Tradeable Assets)")
+    print("VARX EXPERIMENT (9 ETFs + VIX as Exogenous Input)")
     print("=" * 80)
 
     # Create output directory
@@ -151,11 +157,35 @@ def main(
     )
     elapsed = time.perf_counter() - start_time
 
-    print(f"\n  Results:")
+    print(f"\n  Results (full model with VIX):")
     print(f"    Method: {result.method}")
     print(f"    Forecast shape: {result.forecasts.shape}")
     print(f"    Output days: {len(result.dates)}")
     print(f"    Computation time: {elapsed:.2f}s")
+
+    # -------------------------------------------------------------------------
+    # Filter out VIX from result for backtesting (VIX is not tradeable)
+    # -------------------------------------------------------------------------
+    vix_idx = asset_tickers.index("VIX")
+    etf_indices = [i for i in range(len(asset_tickers)) if i != vix_idx]
+    etf_only_tickers = [asset_tickers[i] for i in etf_indices]
+
+    # Create filtered result for backtesting (exclude VIX)
+    from src.results import VARXResult
+    result_for_backtest = VARXResult(
+        forecasts=result.forecasts[etf_indices, :],
+        forecasts_all=result.forecasts_all[etf_indices, :, :],
+        p_optimal=result.p_optimal,
+        p_max=result.p_max,
+        coefficients=result.coefficients[:, :, etf_indices, :][:, :, :, etf_indices],
+        asset_names=etf_only_tickers,
+        confounder_names=["VIX"],  # Mark VIX as confounder since it's not traded
+        dates=result.dates,
+    )
+
+    print(f"\n  Filtered for backtest (VIX excluded from trading):")
+    print(f"    Tradeable assets: {etf_only_tickers}")
+    print(f"    Forecast shape: {result_for_backtest.forecasts.shape}")
 
     # p_optimal statistics
     p_optimal_np = result.p_optimal.cpu().numpy()
@@ -179,9 +209,9 @@ def main(
         columns=all_tickers,
     )
 
-    # Run backtest for all strategies
+    # Run backtest for all strategies (using filtered result without VIX)
     pnl_results = run_backtest(
-        result=result,
+        result=result_for_backtest,
         actual_returns=actual_returns,
         strategies=["naive", "weighted", "top_50", "top_25", "top_75"],
         market_adjustment=True,
@@ -191,7 +221,7 @@ def main(
 
     # Also calculate non-market-adjusted results with SPY
     pnl_results_raw = run_backtest(
-        result=result,
+        result=result_for_backtest,
         actual_returns=actual_returns,
         strategies=["naive", "weighted", "top_50", "top_25", "top_75"],
         market_adjustment=False,
@@ -259,7 +289,7 @@ def main(
     print("-" * 40)
 
     paths = save_experiment_results(
-        result=result,
+        result=result_for_backtest,  # Save filtered result (VIX excluded)
         pnl_results=pnl_results,
         performance_df=performance_df,
         output_dir=output_dir,
@@ -278,13 +308,13 @@ def main(
     print("EXPERIMENT COMPLETE")
     print("=" * 80)
 
-    return result, pnl_results, performance_df
+    return result_for_backtest, pnl_results, performance_df
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run VARX experiment (9 ETFs + VIX as tradeable assets)")
+    parser = argparse.ArgumentParser(description="Run VARX experiment (9 ETFs with VIX as exogenous input)")
     parser.add_argument("--n-days", type=int, default=None, help="Number of days to load (default: all)")
     parser.add_argument("--validation-days", type=int, default=21, help="Validation period (default: 21)")
     parser.add_argument("--p-max", type=int, default=10, help="Maximum lag order (default: 10)")
