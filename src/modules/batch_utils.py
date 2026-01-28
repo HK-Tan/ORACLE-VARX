@@ -5,6 +5,7 @@ and orthogonalized OR-VARX models.
 
 Key functions:
 - batched_ols: Batched ordinary least squares using torch.linalg.solve
+- batched_benjamini_hochberg: Vectorized Benjamini-Hochberg FDR correction
 """
 
 import torch
@@ -120,3 +121,63 @@ def batched_ols(
         ) from e
 
     return beta
+
+
+def batched_benjamini_hochberg(p_values: torch.Tensor, alpha: float) -> torch.Tensor:
+    """
+    Vectorized Benjamini-Hochberg FDR correction.
+
+    Args:
+        p_values: shape (batch_size, n_tests) or (n_tests,)
+        alpha: FDR level
+
+    Returns:
+        reject: boolean tensor, same shape as p_values
+    """
+    if p_values.dim() == 1:
+        p_values = p_values.unsqueeze(0)
+        squeeze = True
+    else:
+        squeeze = False
+
+    batch_size, n_tests = p_values.shape
+    device = p_values.device
+
+    # Sort p-values
+    sorted_pvals, sorted_idx = torch.sort(p_values, dim=1)
+
+    # ECDF factor: [1/m, 2/m, ..., 1]
+    ecdf = torch.arange(1, n_tests + 1, device=device, dtype=p_values.dtype) / n_tests
+
+    # Critical values: (i/m) * alpha
+    thresholds = ecdf * alpha
+
+    # Find largest i where p_(i) <= threshold_i
+    reject_sorted = sorted_pvals <= thresholds
+
+    # Expand rejection: if any position i is rejected, all positions <= i are rejected
+    # Use cummax to propagate rejection forward, then find max rejection index
+    reject_cummax = reject_sorted.cummax(dim=1).values
+
+    # But we need the LARGEST i where p_(i) <= threshold_i, then reject all <= i
+    # Find the rightmost True in reject_sorted
+    has_any_rejection = reject_sorted.any(dim=1, keepdim=True)
+
+    # Create mask where positions <= max_reject_idx are True
+    max_reject_idx = torch.where(
+        reject_sorted,
+        torch.arange(n_tests, device=device).unsqueeze(0).expand(batch_size, -1),
+        torch.zeros(batch_size, n_tests, device=device, dtype=torch.long)
+    ).max(dim=1, keepdim=True).values
+
+    positions = torch.arange(n_tests, device=device).unsqueeze(0)
+    reject_expanded = (positions <= max_reject_idx) & has_any_rejection
+
+    # Restore original order using scatter
+    reject = torch.zeros_like(p_values, dtype=torch.bool)
+    reject.scatter_(1, sorted_idx, reject_expanded)
+
+    if squeeze:
+        reject = reject.squeeze(0)
+
+    return reject

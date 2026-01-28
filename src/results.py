@@ -40,11 +40,6 @@ class VARXResult:
         """Returns True if model uses orthogonalization."""
         return len(self.confounder_names) > 0
 
-    @property
-    def p_grid(self) -> List[int]:
-        """Returns the lag grid [1, 2, ..., p_max]."""
-        return list(range(1, self.p_max + 1))
-
     def to_dataframe(self) -> pd.DataFrame:
         """Convert forecasts to DataFrame with dates as index and assets as columns.
 
@@ -148,6 +143,7 @@ class ORACLEVARXResult:
         asset_names: List of asset names
         confounder_names: List of confounder names (always non-empty for ORACLE)
         dates: List of date strings for each forecast day
+        SE_all: Optional standard errors for all alphas, shape (n_days, p_max, n_assets*p_max, n_assets)
     """
     forecasts: torch.Tensor
     forecasts_all: torch.Tensor
@@ -159,6 +155,7 @@ class ORACLEVARXResult:
     asset_names: List[str]
     confounder_names: List[str]
     dates: List[str]
+    SE_all: Optional[torch.Tensor] = None
 
     @property
     def method(self) -> str:
@@ -259,6 +256,7 @@ class ORACLEVARXResult:
             'asset_names': self.asset_names,
             'confounder_names': self.confounder_names,
             'dates': self.dates,
+            'SE_all': self.SE_all,
             'result_type': 'ORACLEVARXResult'
         }
         torch.save(save_dict, path)
@@ -292,5 +290,6 @@ class ORACLEVARXResult:
             coefficients_all=checkpoint['coefficients_all'],
             asset_names=checkpoint['asset_names'],
             confounder_names=checkpoint['confounder_names'],
-            dates=checkpoint['dates']
+            dates=checkpoint['dates'],
+            SE_all=checkpoint.get('SE_all', None)
         )
