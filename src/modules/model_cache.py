@@ -95,23 +95,6 @@ class ModelCache:
             self.folds[grid_idx] = {}
         self.folds[grid_idx][p] = fold
 
-    def clear_old_folds(self, current_grid_idx: int, keep_n: int = 12) -> None:
-        """
-        Remove old folds from the cache to manage memory.
-
-        Removes all folds with grid_idx older than (current_grid_idx - keep_n).
-        This is optional for memory management, though the plan recommends
-        keeping all folds in memory for potential reuse.
-
-        Args:
-            current_grid_idx: The current grid/fold index.
-            keep_n: Number of recent folds to keep. Defaults to 12.
-        """
-        cutoff = current_grid_idx - keep_n
-        old_indices = [idx for idx in self.folds if idx < cutoff]
-        for idx in old_indices:
-            del self.folds[idx]
-
     def get_all_trained_folds(self, p: int) -> list:
         """
         Get all grid indices that have a trained model for a given lag order.

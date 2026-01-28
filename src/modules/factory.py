@@ -79,6 +79,3 @@ def get_multi_output_regressor(name: str, n_jobs: int = -1, **kwargs) -> Any:
     return MultiOutputRegressor(base, n_jobs=1)
 
 
-def list_available_regressors() -> list:
-    """Return list of available regressor names."""
-    return ['xgboost', 'lgbm', 'rf', 'extra_trees']

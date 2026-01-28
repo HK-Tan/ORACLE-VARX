@@ -30,7 +30,7 @@ import warnings
 
 import torch
 import numpy as np
-from typing import Tuple, List, Optional, Any, Dict
+from typing import Tuple, List, Optional, Any, Dict, Union
 
 from src.results import VARXResult
 from src.modules.grid_config import GridConfig
@@ -38,99 +38,6 @@ from src.models.var_pytorch import select_optimal_p
 from src.modules.model_cache import ModelCache, FoldModels
 from src.modules.factory import get_regressor, get_multi_output_regressor
 from src.modules.batch_utils import batched_ols
-
-
-def build_dml_data(
-    Y: torch.Tensor,
-    W: torch.Tensor,
-    p: int,
-    day_idx: int,
-    lookback: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build DML data for a single day.
-
-    Constructs the outcome, treatment, and control variables for DML estimation:
-    - Outcome: Y_t (current returns)
-    - Treatment: [Y_{t-1}, Y_{t-2}, ..., Y_{t-p}] (lagged returns)
-    - Controls: [W_{t-1}, W_{t-2}, ..., W_{t-p}] (lagged confounders only, no W_t)
-
-    Note: Controls exclude W_t (current confounders) to avoid lookahead bias.
-    At prediction time, we don't know W_t when predicting Y_t.
-
-    Args:
-        Y: Asset returns, shape (n_days, n_assets)
-        W: Confounders, shape (n_days, n_confounders)
-        p: Lag order
-        day_idx: Current day index (end of lookback window)
-        lookback: Window size
-
-    Returns:
-        outcome: Y values for regression, shape (n_rows, n_assets) where n_rows = lookback - p
-        treatment: Lagged Y values (T), shape (n_rows, n_assets*p)
-        controls: Lagged W values only, shape (n_rows, n_controls)
-                 where n_controls = n_confounders * p
-
-    Raises:
-        ValueError: If parameters are invalid or data is insufficient
-
-    Example:
-        >>> Y = torch.randn(900, 5)  # 900 days, 5 assets
-        >>> W = torch.randn(900, 3)  # 900 days, 3 confounders
-        >>> outcome, treatment, controls = build_dml_data(Y, W, p=2, day_idx=756, lookback=756)
-        >>> print(outcome.shape)  # (754, 5)
-        >>> print(treatment.shape)  # (754, 10) = 5 assets * 2 lags
-        >>> print(controls.shape)  # (754, 6) = 3 confounders * 2 lags (no current W)
-    """
-    n_days_y, n_assets = Y.shape
-    n_days_w, n_confounders = W.shape
-
-    # Validation
-    if n_days_y != n_days_w:
-        raise ValueError(f"Y and W must have same number of days: {n_days_y} vs {n_days_w}")
-    if p < 1:
-        raise ValueError(f"Lag order p must be >= 1, got {p}")
-    if day_idx < lookback:
-        raise ValueError(f"day_idx {day_idx} must be >= lookback {lookback}")
-    if lookback <= p:
-        raise ValueError(f"lookback {lookback} must be > p {p}")
-    if day_idx > n_days_y:
-        raise ValueError(f"day_idx {day_idx} exceeds data length {n_days_y}")
-
-    # Extract window for this day
-    start_idx = day_idx - lookback
-    end_idx = day_idx
-
-    Y_window = Y[start_idx:end_idx, :]  # (lookback, n_assets)
-    W_window = W[start_idx:end_idx, :]  # (lookback, n_confounders)
-
-    T = lookback - p  # Number of observations after lagging
-
-    # Build outcome: Y_t for t = p, p+1, ..., lookback-1
-    outcome = Y_window[p:, :]  # (T, n_assets)
-
-    # Build treatment: lagged returns [Y_{t-1}, ..., Y_{t-p}]
-    # Shape: (T, n_assets * p)
-    device = Y.device
-    dtype = Y.dtype
-
-    # Vectorized: stack all lags and reshape
-    # Each lag gives shape (T, n_assets), stacking gives (T, n_assets, p)
-    lags = torch.stack([Y_window[p - lag:lookback - lag, :] for lag in range(1, p + 1)], dim=2)
-    # Permute to (T, p, n_assets) then reshape to (T, n_assets * p)
-    treatment = lags.permute(0, 2, 1).reshape(T, n_assets * p)
-
-    # Build controls: lagged confounders only (no current W_t to avoid lookahead bias)
-    # [W_{t-1}, W_{t-2}, ..., W_{t-p}]
-    # Shape: (T, n_confounders * p)
-    n_controls = n_confounders * p
-
-    # Vectorized: stack lagged confounders and reshape
-    # Each lag gives shape (T, n_confounders), stacking gives (T, n_confounders, p)
-    lagged_controls = torch.stack([W_window[p - lag:lookback - lag, :] for lag in range(1, p + 1)], dim=2)
-    # Permute to (T, p, n_confounders) then reshape to (T, n_confounders * p)
-    controls = lagged_controls.permute(0, 2, 1).reshape(T, n_confounders * p)
-
-    return outcome, treatment, controls
 
 
 def estimate_theta(
@@ -868,7 +775,8 @@ def fit_orvarx_batched(
     learner_name: str = 'xgboost',
     n_jobs: int = -1,
     verbose: bool = False,
-) -> VARXResult:
+    return_se: bool = False,
+) -> Union[VARXResult, Tuple[VARXResult, torch.Tensor]]:
     """Fit OR-VARX model using vectorized/batched operations.
 
     This is an optimized version of fit_orvarx() that:
@@ -892,13 +800,17 @@ def fit_orvarx_batched(
         learner_name: First-stage learner ('xgboost', 'lgbm', 'rf', 'extra_trees')
         n_jobs: Number of CPU cores (-1 for all, 5 recommended)
         verbose: If True, print detailed progress
+        return_se: If True, compute and return standard errors (default: False)
 
     Returns:
-        VARXResult with is_orthogonalized=True
+        If return_se=False: VARXResult with is_orthogonalized=True
+        If return_se=True: Tuple of (VARXResult, standard_errors) where
+            standard_errors has shape (n_output_days, p_max, n_assets, n_assets)
 
     Notes:
         - Results should be identical to fit_orvarx() (just faster)
         - Memory usage is higher due to pre-computed residuals
+        - Standard errors use OLS formula: SE[j,k] = sqrt(diag((T'T)^{-1})[j] * σ²[k])
     """
     # Use default config if not provided
     if config is None:
@@ -982,6 +894,12 @@ def fit_orvarx_batched(
     forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=device, dtype=dtype)
     coefficients = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
 
+    # Initialize SE storage if requested
+    if return_se:
+        standard_errors = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
+    else:
+        standard_errors = None
+
     # =========================================================================
     # Step 2 & 3: For each p, pre-compute residuals and run batched OLS
     # =========================================================================
@@ -1031,12 +949,36 @@ def fit_orvarx_batched(
                 theta_all = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
                 # theta_all shape: (n_windows, n_treatments, n_assets)
 
-                # Store coefficients for all valid days at once
+                # Batched SE computation if requested
+                se_all = None
+                if return_se:
+                    # Compute (T'T)^{-1} diagonal elements for all windows
+                    # TtT[i] = T_windows[i]' @ T_windows[i]
+                    TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)  # (n_windows, n_treatments, n_treatments)
+                    TtT_inv = torch.linalg.inv(TtT)  # (n_windows, n_treatments, n_treatments)
+                    TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)  # (n_windows, n_treatments)
+
+                    # Compute residuals and sigma^2 for each window
+                    Y_pred = torch.bmm(T_windows, theta_all)  # (n_windows, ols_window, n_assets)
+                    residuals = Y_windows - Y_pred  # (n_windows, ols_window, n_assets)
+                    RSS = (residuals ** 2).sum(dim=1)  # (n_windows, n_assets)
+                    df = ols_window - n_treatments  # Degrees of freedom
+                    sigma_sq = RSS / df  # (n_windows, n_assets)
+
+                    # SE[i,j,k] = sqrt(TtT_inv_diag[i,j] * sigma_sq[i,k])
+                    se_all = torch.sqrt(TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1))
+                    # se_all shape: (n_windows, n_treatments, n_assets)
+
+                # Store coefficients and SEs for all valid days at once
                 for i in range(n_windows):
                     day_rel_idx = i + offset
                     if 0 <= day_rel_idx < n_total_test_days:
                         theta_reshaped = theta_all[i].view(p, n_assets, n_assets)
                         coefficients[day_rel_idx, :p, :, :] = theta_reshaped
+
+                        if return_se and se_all is not None:
+                            se_reshaped = se_all[i].view(p, n_assets, n_assets)
+                            standard_errors[day_rel_idx, :p, :, :] = se_reshaped
 
             except RuntimeError:
                 # Singular matrix encountered - this shouldn't happen with proper residualization
@@ -1112,11 +1054,17 @@ def fit_orvarx_batched(
     # Trim coefficients to output days
     coefficients_output = coefficients[validation_days:, :, :, :]
 
+    # Trim standard errors to output days if computed
+    if return_se:
+        standard_errors_output = standard_errors[validation_days:, :, :, :]
+    else:
+        standard_errors_output = None
+
     # Transpose to match VARXResult expected shape
     forecasts = forecasts.T
     forecasts_all = forecasts_all.transpose(0, 1)[:, validation_days:, :]
 
-    return VARXResult(
+    result = VARXResult(
         forecasts=forecasts,
         forecasts_all=forecasts_all,
         p_optimal=p_optimal,
@@ -1126,3 +1074,9 @@ def fit_orvarx_batched(
         confounder_names=confounder_names,
         dates=dates,
     )
+
+    # Return tuple with SEs if requested, otherwise just the result
+    if return_se:
+        return result, standard_errors_output
+    else:
+        return result

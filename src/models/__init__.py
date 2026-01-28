@@ -16,7 +16,6 @@ from src.models.var_pytorch import (
 
 from src.models.dml_pytorch import (
     fit_orvarx_batched,
-    build_dml_data,
     estimate_theta,
     compute_se_oracle,
     fit_orvarx_single_day,
@@ -41,7 +40,6 @@ __all__ = [
     'select_optimal_p',
     # DML / OR-VARX functions
     'fit_orvarx_batched',
-    'build_dml_data',
     'estimate_theta',
     'compute_se_oracle',
     'fit_orvarx_single_day',
