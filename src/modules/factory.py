@@ -8,9 +8,34 @@ Supports tree-based learners with native parallelization:
 
 All learners use n_jobs for CPU parallelization.
 """
+import os
 import xgboost as xgb
 import lightgbm as lgb
 from typing import Any
+
+
+def _get_physical_cpu_count() -> int:
+    """Get the number of physical CPU cores (not logical/hyperthreaded)."""
+    try:
+        import psutil
+        return psutil.cpu_count(logical=False) or 1
+    except ImportError:
+        logical = os.cpu_count() or 2
+        return max(1, logical // 2)
+
+
+def resolve_n_jobs(n_jobs: int) -> int:
+    """Resolve n_jobs to actual core count.
+
+    Args:
+        n_jobs: Number of jobs. -1 means all cores minus 1 (to avoid LightGBM issues).
+
+    Returns:
+        Resolved number of jobs (always positive).
+    """
+    if n_jobs == -1:
+        return max(1, _get_physical_cpu_count() - 1)
+    return n_jobs
 
 
 def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
@@ -18,7 +43,7 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
 
     Args:
         name: Regressor name. Options: 'xgboost', 'lgbm', 'rf', 'extra_trees'.
-        n_jobs: Number of parallel jobs (-1 for all cores, 5 recommended based on benchmarks)
+        n_jobs: Number of parallel jobs (-1 for all cores minus 1, to avoid LightGBM issues)
         **kwargs: Additional arguments passed to the regressor
 
     Returns:
@@ -27,6 +52,8 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
     Raises:
         ValueError: If unknown regressor name
     """
+    n_jobs = resolve_n_jobs(n_jobs)
+
     if name == 'xgboost':
         return xgb.XGBRegressor(
             n_jobs=n_jobs,
@@ -68,7 +95,7 @@ def get_multi_output_regressor(name: str, n_jobs: int = -1, **kwargs) -> Any:
 
     Args:
         name: Base regressor name
-        n_jobs: Number of parallel jobs (-1 for all cores, 5 recommended)
+        n_jobs: Number of parallel jobs (-1 for all cores minus 1)
         **kwargs: Additional arguments passed to the base regressor
 
     Returns:
