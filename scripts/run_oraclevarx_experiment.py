@@ -73,7 +73,7 @@ def main(
         p_max: Maximum lag order to consider.
         alpha_grid: Significance levels for p-selection (default: [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]).
         learner_name: First-stage learner ('xgboost', 'lgbm', 'rf', 'extra_trees').
-        n_jobs: Number of CPU cores for parallel processing (-1 for all).
+        n_jobs: Number of CPU cores for parallel processing (-1 for all cores minus 1, default, avoids LightGBM issues).
         device: Device to run on ("cpu" or "cuda").
         output_dir: Directory to save results.
         experiment_name: Name for the experiment. If None, auto-generated.
@@ -319,7 +319,7 @@ if __name__ == "__main__":
                         help="Comma-separated alpha values (default: 0.01,0.05,0.10,0.15,0.20,0.25,0.30)")
     parser.add_argument("--learner", type=str, default="lgbm", choices=["xgboost", "lgbm", "rf", "extra_trees"],
                         help="First-stage learner (default: lgbm)")
-    parser.add_argument("--n-jobs", type=int, default=-1, help="Number of CPU cores (default: -1 for all)")
+    parser.add_argument("--n-jobs", type=int, default=-1, help="Number of CPU cores (-1 for all cores minus 1, default, avoids LightGBM issues)")
     parser.add_argument("--device", type=str, default="cpu", help="Device (cpu/cuda)")
     parser.add_argument("--output-dir", type=str, default="results/oraclevarx", help="Output directory")
     parser.add_argument("--name", type=str, default=None, help="Experiment name")

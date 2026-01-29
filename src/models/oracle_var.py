@@ -54,6 +54,7 @@ from src.results import ORACLEVARXResult
 from src.modules.grid_config import GridConfig
 from src.models.dml_pytorch import _fit_orvarx_core
 from src.modules.batch_utils import batched_benjamini_hochberg
+from src.models.var_pytorch import rolling_alpha_selection
 
 
 def fit_oraclevarx_batched(
@@ -294,59 +295,26 @@ def fit_oraclevarx_batched(
     print("  Phase 2: Complete.")
 
     # =========================================================================
-    # Phase 3: α Selection via Validation (the ONLY validation)
+    # Phase 3: Rolling α Selection via Validation
     # =========================================================================
-    print("  Phase 3: Selecting optimal α via validation RMSE...")
+    print("  Phase 3: Selecting optimal α via ROLLING validation RMSE...")
 
-    # For each α, compute validation RMSE using forecasts at selected p
-    # forecasts_all_batched: (n_assets, n_total_test_days, p_max)
-    # p_alpha_all: (n_total_test_days, n_alphas)
-    # actuals: (n_total_test_days, n_assets) - from _fit_orvarx_core()
-
-    # Extract validation period (first validation_days)
-    val_start = 0
-    val_end = validation_days  # Uses full validation_days (no -1 hack!)
-
-    actuals_val = actuals[val_start:val_end, :]  # (validation_days, n_assets)
-
-    # Compute RMSE for each α
-    rmse_per_alpha = torch.zeros(n_alphas, device=device, dtype=dtype)
-
-    for alpha_idx in range(n_alphas):
-        # For each validation day, extract forecast at p_α[d, α_idx]
-        forecasts_alpha = torch.zeros(val_end - val_start, n_assets, device=device, dtype=dtype)
-
-        for d in range(val_start, val_end):
-            p_selected = p_alpha_all[d, alpha_idx].item()
-            # forecasts_all_batched[:, d, p_selected-1] gives forecast for day d at lag p_selected
-            forecasts_alpha[d - val_start, :] = forecasts_all_batched[:, d, p_selected - 1]
-
-        # Compute RMSE
-        errors = forecasts_alpha - actuals_val  # (val_days, n_assets)
-        rmse_per_alpha[alpha_idx] = torch.sqrt((errors ** 2).mean())
-
-    # Select α with minimum RMSE
-    alpha_optimal_idx = torch.argmin(rmse_per_alpha).item()
-    alpha_optimal_value = alpha_grid[alpha_optimal_idx]
-
-    # Create alpha_optimal tensor: (n_total_test_days,) with constant value
-    alpha_optimal = torch.full((n_total_test_days,), alpha_optimal_idx, device=device, dtype=torch.long)
-
-    print(f"  Optimal α: {alpha_optimal_value:.3f} (idx={alpha_optimal_idx}, "
-          f"RMSE: {rmse_per_alpha[alpha_optimal_idx]:.6f})")
-
-    # Print RMSE for all alphas
-    print(f"  RMSE per α:")
-    for idx, (alpha_val, rmse_val) in enumerate(zip(alpha_grid, rmse_per_alpha)):
-        marker = " *" if idx == alpha_optimal_idx else ""
-        print(f"    α={alpha_val:.3f}: RMSE={rmse_val:.6f}{marker}")
-
-    # Extract p_optimal from p_alpha_all using optimal α
-    p_optimal_all_days = p_alpha_all[:, alpha_optimal_idx]  # (n_total_test_days,)
+    # Use rolling_alpha_selection for per-day alpha selection
+    # This matches ACLEVARX behavior - each output day has its own optimal α
+    # based on trailing validation window [d, d + validation_days)
+    alpha_optimal, alpha_counts, alpha_percentages, p_optimal_all_days = rolling_alpha_selection(
+        forecasts_all_batched=forecasts_all_batched,
+        p_alpha_all=p_alpha_all,
+        actuals=actuals,
+        validation_days=validation_days,
+        alpha_grid=alpha_grid,
+        verbose=True,
+        use_greek_symbol=True,
+    )
 
     # Print summary statistics for selected p values
     p_optimal_np = p_optimal_all_days.cpu().numpy()
-    print(f"  Selected p statistics (at optimal α={alpha_optimal_value:.3f}):")
+    print(f"  Selected p statistics (rolling α selection):")
     print(f"    Mean: {p_optimal_np.mean():.2f}")
     print(f"    Median: {int(np.median(p_optimal_np))}")
     print(f"    Min: {p_optimal_np.min()}, Max: {p_optimal_np.max()}")
@@ -360,13 +328,14 @@ def fit_oraclevarx_batched(
     # n_output_days = n_total_test_days - validation_days (CLEAN formula!)
     # Already computed and validated at the start of the function
 
-    # Extract forecasts for output days (skip validation days)
-    # For each output day, retrieve forecast at p_optimal_all_days[validation_days + d]
+    # Extract forecasts for output days
+    # For each output day d, retrieve forecast at (α_optimal[d], p_optimal[d])
+    # alpha_optimal and p_optimal_all_days are already indexed for output days (n_output_days,)
     forecasts_output = torch.zeros(n_output_days, n_assets, device=device, dtype=dtype)
 
     for d in range(n_output_days):
-        day_idx_full = validation_days + d  # Index in available data
-        p_selected = p_optimal_all_days[day_idx_full].item()
+        day_idx_full = validation_days + d  # Index in full test data
+        p_selected = p_optimal_all_days[d].item()  # p_optimal_all_days is (n_output_days,)
         # Retrieve forecast from forecasts_all_batched
         forecasts_output[d, :] = forecasts_all_batched[:, day_idx_full, p_selected - 1]
 
@@ -403,10 +372,12 @@ def fit_oraclevarx_batched(
             # Copy coefficients for lags [0, ..., p_selected-1] (0-indexed)
             coefficients_all[d, alpha_idx, :p_selected, :, :] = theta_all[day_idx_full, :p_selected, :, :]
 
-    # Trim arrays to output days
+    # Prepare arrays for result
+    # p_alpha_all needs trimming: (n_total_test_days, n_alphas) -> (n_output_days, n_alphas)
     p_optimal_all_output = p_alpha_all[validation_days:, :]  # (n_output_days, n_alphas)
-    alpha_optimal_output = alpha_optimal[validation_days:]  # (n_output_days,)
-    p_optimal_output = p_optimal_all_days[validation_days:]  # (n_output_days,)
+    # alpha_optimal and p_optimal_all_days are already (n_output_days,) from rolling_alpha_selection
+    alpha_optimal_output = alpha_optimal  # (n_output_days,)
+    p_optimal_output = p_optimal_all_days  # (n_output_days,)
 
     # Store SE_all (full test period) for optional future use
     SE_all_output = SE_all  # Keep full array for reference

@@ -55,7 +55,7 @@ def main(
     validation_days: int = 21,
     p_max: int = 10,
     learner_name: str = "lgbm",
-    n_jobs: int = 10, # -1 if we want to use all
+    n_jobs: int = 10, # -1 for all cores minus 1 (avoids LightGBM issues)
     device: str = "cpu",
     output_dir: str = "results/orvarx",
     experiment_name: str = None,
@@ -69,7 +69,7 @@ def main(
         validation_days: Number of days for optimal p selection.
         p_max: Maximum lag order to consider.
         learner_name: First-stage learner ('xgboost', 'lgbm', 'rf', 'extra_trees').
-        n_jobs: Number of CPU cores for parallel processing (-1 for all).
+        n_jobs: Number of CPU cores for parallel processing (-1 for all cores minus 1, avoids LightGBM issues).
         device: Device to run on ("cpu" or "cuda").
         output_dir: Directory to save results.
         experiment_name: Name for the experiment. If None, auto-generated.
@@ -296,7 +296,7 @@ if __name__ == "__main__":
     parser.add_argument("--p-max", type=int, default=10, help="Maximum lag order (default: 10)")
     parser.add_argument("--learner", type=str, default="lgbm", choices=["xgboost", "lgbm", "rf", "extra_trees"],
                         help="First-stage learner (default: lgbm)")
-    parser.add_argument("--n-jobs", type=int, default=-1, help="Number of CPU cores (default: -1 for all)")
+    parser.add_argument("--n-jobs", type=int, default=-1, help="Number of CPU cores (-1 for all cores minus 1 (default, avoids LightGBM issues))")
     parser.add_argument("--device", type=str, default="cpu", help="Device (cpu/cuda)")
     parser.add_argument("--output-dir", type=str, default="results/orvarx", help="Output directory")
     parser.add_argument("--name", type=str, default=None, help="Experiment name")

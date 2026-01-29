@@ -840,10 +840,10 @@ def _fit_orvarx_core(
     cache = ModelCache(n_assets=n_assets, n_confounders=n_confounders, p_max=p_max)
 
     n_cpus = get_physical_cpu_count()
-    n_jobs_display = n_cpus if n_jobs == -1 else n_jobs
+    n_jobs_resolved = max(1, n_cpus - 1) if n_jobs == -1 else n_jobs
     print(f"  Core DML: {n_total_test_days} test days, p_max={p_max}, learner={learner_name}")
     print(f"  Grid config: train_size={config.train_size}, test_size={config.test_size}, lookback={lookback}")
-    print(f"  Using {n_jobs_display} CPU cores ({n_cpus} physical cores available)")
+    print(f"  Using {n_jobs_resolved} CPU cores ({n_cpus} physical cores available)")
 
     # =========================================================================
     # Step 1: Determine and pre-train all required folds
@@ -853,12 +853,16 @@ def _fit_orvarx_core(
     print(f"      Total folds needed: {len(all_folds)}")
 
     total_train_time = 0.0
-    for grid_idx in all_folds:
+    n_folds = len(all_folds)
+    for fold_num, grid_idx in enumerate(all_folds):
         for p in range(1, p_max + 1):
             _, was_hit, train_time = ensure_fold_trained(
                 cache, grid_idx, p, Y_np, W_np, config, learner_name, n_jobs, verbose
             )
             total_train_time += train_time
+        # Progress every 10 folds (or first/last)
+        if fold_num == 0 or (fold_num + 1) % 10 == 0 or fold_num == n_folds - 1:
+            print(f"      Fold {fold_num + 1}/{n_folds} done ({total_train_time:.1f}s elapsed)", flush=True)
 
     print(f"      Training completed in {total_train_time:.2f}s")
 
