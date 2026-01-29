@@ -27,9 +27,8 @@ VERBOSE = True      # Set to True to see detailed progress (fold training)
 # CPU cores for parallel training (5 recommended based on benchmarks, -1 for all)
 N_CPU_CORES = 5
 
-LEARNERS = ['extra_trees', 'rf', 'lgbm', 'xgboost']
-
-# LEARNERS = ['lgbm']
+# LEARNERS = ['extra_trees', 'rf', 'lgbm', 'xgboost']
+LEARNERS = ['lgbm']
 
 def main():
     # Set parameters based on TOY_EXAMPLE mode

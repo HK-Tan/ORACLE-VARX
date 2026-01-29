@@ -4,6 +4,13 @@ This module provides implementations of:
 - VAR: Vector autoregression
 - OR-VARX: Orthogonalized VAR with exogenous variables (DML)
 - ORACLE-VARX: Adaptive orthogonalization with optimal alpha selection
+
+Architecture:
+    _fit_orvarx_core()           <- Core DML: fold training, residuals, batched OLS
+        |
+        +---> fit_orvarx_batched()       <- p-selection via validation RMSE
+        |
+        +---> fit_oraclevarx_batched()   <- p-selection via significance + α-selection
 """
 
 from src.models.var_pytorch import (
@@ -16,6 +23,7 @@ from src.models.var_pytorch import (
 
 from src.models.dml_pytorch import (
     fit_orvarx_batched,
+    _fit_orvarx_core,
     estimate_theta,
     compute_se_oracle,
     fit_orvarx_single_day,
@@ -29,6 +37,8 @@ from src.models.dml_pytorch import (
     precompute_all_residuals,
 )
 
+from src.models.oracle_var import fit_oraclevarx_batched
+
 from src.modules.grid_config import GridConfig
 
 __all__ = [
@@ -40,9 +50,12 @@ __all__ = [
     'select_optimal_p',
     # DML / OR-VARX functions
     'fit_orvarx_batched',
+    '_fit_orvarx_core',
     'estimate_theta',
     'compute_se_oracle',
     'fit_orvarx_single_day',
+    # ORACLE-VARX functions
+    'fit_oraclevarx_batched',
     # Grid-based functions
     'compute_fold_boundaries',
     'get_active_folds_for_day',

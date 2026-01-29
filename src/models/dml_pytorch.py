@@ -39,6 +39,9 @@ from src.modules.model_cache import ModelCache, FoldModels
 from src.modules.factory import get_regressor, get_multi_output_regressor
 from src.modules.batch_utils import batched_ols
 
+# Type alias for core result tuple
+CoreResult = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+
 
 def estimate_theta(
     Y_residuals: torch.Tensor,
@@ -763,6 +766,230 @@ def precompute_all_residuals(
     return R_Y, R_T, first_row, n_rows
 
 
+def _fit_orvarx_core(
+    Y: torch.Tensor,
+    W: torch.Tensor,
+    p_max: int = 10,
+    config: Optional[GridConfig] = None,
+    learner_name: str = 'xgboost',
+    n_jobs: int = -1,
+    verbose: bool = False,
+) -> CoreResult:
+    """Core OR-VARX DML computation without validation trimming or p-selection.
+
+    This is the shared computation layer used by both fit_orvarx_batched() and
+    fit_oraclevarx_batched(). It performs:
+    1. Pre-training all required grid folds
+    2. Pre-computing residuals for all test windows
+    3. Batched OLS for all days and all lags
+
+    The function returns raw data for ALL test days without any trimming or
+    p-selection. Callers are responsible for:
+    - OR-VARX: p-selection via validation RMSE, then trimming
+    - ORACLE-VARX: significance-based p-selection + α-selection, then trimming
+
+    Args:
+        Y: Asset returns, shape (n_days, n_assets)
+        W: Confounders, shape (n_days, n_confounders)
+        p_max: Maximum lag order to consider (default: 10)
+        config: GridConfig instance (default: None, uses default GridConfig)
+        learner_name: First-stage learner ('xgboost', 'lgbm', 'rf', 'extra_trees')
+        n_jobs: Number of CPU cores (-1 for all, 5 recommended)
+        verbose: If True, print detailed progress
+
+    Returns:
+        Tuple of (forecasts_all, coefficients, standard_errors, actuals) where:
+        - forecasts_all: shape (n_total_test_days, n_assets, p_max)
+        - coefficients: shape (n_total_test_days, p_max, n_assets, n_assets)
+        - standard_errors: shape (n_total_test_days, p_max, n_assets, n_assets)
+        - actuals: shape (n_total_test_days, n_assets) - actual Y values for validation
+
+    Notes:
+        - Returns ALL test days (n_days - lookback), no trimming
+        - Always computes standard errors (needed by both callers)
+        - Does NOT perform p-selection
+    """
+    # Use default config if not provided
+    if config is None:
+        config = GridConfig()
+
+    n_days, n_assets = Y.shape
+    n_days_w, n_confounders = W.shape
+
+    # Validation
+    if n_days != n_days_w:
+        raise ValueError(f"Y and W must have same number of days: {n_days} vs {n_days_w}")
+    if p_max < 1:
+        raise ValueError(f"p_max must be >= 1, got {p_max}")
+    lookback = config.lookback_orvarx
+    if lookback < p_max:
+        raise ValueError(f"lookback {lookback} must be >= p_max {p_max}")
+    if n_days <= lookback:
+        raise ValueError(f"Need at least {lookback + 1} days, got {n_days}")
+
+    n_total_test_days = n_days - lookback
+
+    device = Y.device
+    dtype = Y.dtype
+
+    # Convert to numpy for sklearn models
+    Y_np = Y.cpu().numpy()
+    W_np = W.cpu().numpy()
+
+    # Create model cache
+    cache = ModelCache(n_assets=n_assets, n_confounders=n_confounders, p_max=p_max)
+
+    n_cpus = get_physical_cpu_count()
+    n_jobs_display = n_cpus if n_jobs == -1 else n_jobs
+    print(f"  Core DML: {n_total_test_days} test days, p_max={p_max}, learner={learner_name}")
+    print(f"  Grid config: train_size={config.train_size}, test_size={config.test_size}, lookback={lookback}")
+    print(f"  Using {n_jobs_display} CPU cores ({n_cpus} physical cores available)")
+
+    # =========================================================================
+    # Step 1: Determine and pre-train all required folds
+    # =========================================================================
+    print("    Step 1: Pre-training all required folds...")
+    all_folds = get_all_required_folds(n_days, p_max, config)
+    print(f"      Total folds needed: {len(all_folds)}")
+
+    total_train_time = 0.0
+    for grid_idx in all_folds:
+        for p in range(1, p_max + 1):
+            _, was_hit, train_time = ensure_fold_trained(
+                cache, grid_idx, p, Y_np, W_np, config, learner_name, n_jobs, verbose
+            )
+            total_train_time += train_time
+
+    print(f"      Training completed in {total_train_time:.2f}s")
+
+    # Initialize storage for ALL test days (no trimming)
+    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=device, dtype=dtype)
+    coefficients = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
+    standard_errors = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
+
+    # =========================================================================
+    # Step 2 & 3: For each p, pre-compute residuals and run batched OLS
+    # =========================================================================
+    print("    Step 2-3: Pre-computing residuals and running batched OLS...")
+
+    ols_window = config.ols_window
+
+    for p in range(1, p_max + 1):
+        n_treatments = n_assets * p
+
+        # Pre-compute all residuals for this p
+        R_Y_np, R_T_np, first_row, n_residual_rows = precompute_all_residuals(
+            cache, p, Y_np, W_np, config, learner_name, n_jobs, verbose
+        )
+
+        # Convert to torch
+        R_Y = torch.from_numpy(R_Y_np).to(device=device, dtype=dtype)
+        R_T = torch.from_numpy(R_T_np).to(device=device, dtype=dtype)
+
+        # =====================================================================
+        # Batched OLS: Use unfold() to create sliding windows, then batched_ols()
+        # =====================================================================
+        theta_all = None
+        offset = first_row + ols_window - lookback
+        n_windows = 0
+
+        if n_residual_rows >= ols_window:
+            # Create sliding windows using unfold
+            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_treatments)
+            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_assets)
+            n_windows = T_windows.shape[0]
+
+            try:
+                theta_all = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
+                # theta_all shape: (n_windows, n_treatments, n_assets)
+
+                # Batched SE computation (always compute - needed by both models)
+                # Compute (T'T)^{-1} diagonal elements for all windows
+                TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)  # (n_windows, n_treatments, n_treatments)
+                TtT_inv = torch.linalg.inv(TtT)  # (n_windows, n_treatments, n_treatments)
+                TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)  # (n_windows, n_treatments)
+
+                # Compute residuals and sigma^2 for each window
+                Y_pred = torch.bmm(T_windows, theta_all)  # (n_windows, ols_window, n_assets)
+                residuals = Y_windows - Y_pred  # (n_windows, ols_window, n_assets)
+                RSS = (residuals ** 2).sum(dim=1)  # (n_windows, n_assets)
+                df = ols_window - n_treatments  # Degrees of freedom
+                sigma_sq = RSS / df  # (n_windows, n_assets)
+
+                # SE[i,j,k] = sqrt(TtT_inv_diag[i,j] * sigma_sq[i,k])
+                se_all = torch.sqrt(TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1))
+                # se_all shape: (n_windows, n_treatments, n_assets)
+
+                # Store coefficients and SEs for all valid days at once
+                for i in range(n_windows):
+                    day_rel_idx = i + offset
+                    if 0 <= day_rel_idx < n_total_test_days:
+                        theta_reshaped = theta_all[i].view(p, n_assets, n_assets)
+                        coefficients[day_rel_idx, :p, :, :] = theta_reshaped
+
+                        se_reshaped = se_all[i].view(p, n_assets, n_assets)
+                        standard_errors[day_rel_idx, :p, :, :] = se_reshaped
+
+            except RuntimeError:
+                # Singular matrix encountered - this shouldn't happen with proper residualization
+                theta_all = None
+
+        # =====================================================================
+        # Forecast generation loop (must stay sequential - model_t.predict dependency)
+        # =====================================================================
+        for day_rel_idx in range(n_total_test_days):
+            day_idx = lookback + day_rel_idx
+
+            # Get theta for this day from batched result
+            window_idx = day_rel_idx - offset
+            if theta_all is None or window_idx < 0 or window_idx >= n_windows:
+                # No valid theta for this day (early days or batched OLS failed)
+                continue
+
+            theta = theta_all[window_idx]  # (n_treatments, n_assets)
+
+            # Generate forecast
+            indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
+            treatment_pred = Y[indices, :].reshape(1, n_treatments)
+
+            # Build control features for prediction (lagged only)
+            lagged_indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
+            controls_pred = W[lagged_indices, :].reshape(1, n_confounders * p)
+
+            # Get the most recent fold for residualizing prediction
+            active_folds = get_active_folds_for_day(day_idx, p, config)
+            last_fold_idx = max(active_folds)
+            last_fold = cache.get_fold(last_fold_idx, p)
+
+            if last_fold is None:
+                continue
+
+            # Residualize treatment using the last fold's model
+            controls_pred_np = controls_pred.cpu().numpy()
+            treatment_pred_np = treatment_pred.cpu().numpy()
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
+                T_hat = last_fold.model_t.predict(controls_pred_np)
+
+            T_pred_residual = treatment_pred_np - T_hat
+            T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
+
+            # Compute forecast: T_residual * theta
+            forecast = torch.mm(T_pred_residual_torch, theta).squeeze(0)
+            forecasts_all[day_rel_idx, :, p - 1] = forecast
+
+        if verbose:
+            print(f"      p={p}: completed")
+
+    print("    Step 2-3: Complete")
+
+    # Actuals for ALL test days (no trimming)
+    actuals = Y[lookback:, :]  # (n_total_test_days, n_assets)
+
+    return forecasts_all, coefficients, standard_errors, actuals
+
+
 def fit_orvarx_batched(
     Y: torch.Tensor,
     W: torch.Tensor,
@@ -779,21 +1006,16 @@ def fit_orvarx_batched(
 ) -> Union[VARXResult, Tuple[VARXResult, torch.Tensor]]:
     """Fit OR-VARX model using vectorized/batched operations.
 
-    This is an optimized version of fit_orvarx() that:
-    1. Pre-trains all required folds upfront
-    2. Pre-computes residuals for entire test windows (one predict per fold)
-    3. Uses batched OLS for all days at once
-
-    The expected speedup comes from:
-    - Reducing predict() calls from O(days × p × folds) to O(folds × p)
-    - Using batched OLS instead of sequential OLS
+    This function uses _fit_orvarx_core() for DML computation, then applies
+    p-selection via validation RMSE and output trimming.
 
     Args:
         Y: Asset returns, shape (n_days, n_assets)
         W: Confounders, shape (n_days, n_confounders)
         p_max: Maximum lag order to consider (default: 10)
         config: GridConfig instance (default: None, uses default GridConfig)
-        validation_days: Number of days to use for validation (default: 21)
+        validation_days: Number of days for p-selection via validation RMSE.
+                         Must be >= 1. This determines the output trimming.
         asset_names: Names of assets (default: None, uses A1, A2, ...)
         confounder_names: Names of confounders (default: None, uses W1, W2, ...)
         dates: Date strings for forecast days (default: None, uses indices)
@@ -807,9 +1029,12 @@ def fit_orvarx_batched(
         If return_se=True: Tuple of (VARXResult, standard_errors) where
             standard_errors has shape (n_output_days, p_max, n_assets, n_assets)
 
+    Output Shape:
+        n_output_days = (n_days - lookback) - validation_days
+
     Notes:
-        - Results should be identical to fit_orvarx() (just faster)
-        - Memory usage is higher due to pre-computed residuals
+        - Uses _fit_orvarx_core() for shared DML computation
+        - p-selection is done via validation RMSE (different from ORACLE-VARX)
         - Standard errors use OLS formula: SE[j,k] = sqrt(diag((T'T)^{-1})[j] * σ²[k])
     """
     # Use default config if not provided
@@ -857,189 +1082,24 @@ def fit_orvarx_batched(
     elif len(dates) != n_output_days:
         raise ValueError(f"Expected {n_output_days} dates, got {len(dates)}")
 
-    device = Y.device
-    dtype = Y.dtype
-
-    # Convert to numpy for sklearn models
-    Y_np = Y.cpu().numpy()
-    W_np = W.cpu().numpy()
-
-    # Create model cache
-    cache = ModelCache(n_assets=n_assets, n_confounders=n_confounders, p_max=p_max)
-
-    n_cpus = get_physical_cpu_count()
-    n_jobs_display = n_cpus if n_jobs == -1 else n_jobs
-    print(f"Fitting OR-VARX (batched) for {n_total_test_days} days, p_max={p_max}, learner={learner_name}")
-    print(f"Grid config: train_size={config.train_size}, test_size={config.test_size}, lookback={lookback}")
-    print(f"Using {n_jobs_display} CPU cores ({n_cpus} physical cores available)")
+    print(f"Fitting OR-VARX (batched) for {n_total_test_days} test days, p_max={p_max}, learner={learner_name}")
 
     # =========================================================================
-    # Step 1: Determine and pre-train all required folds
+    # Call core function for DML computation (returns ALL test days, no trimming)
     # =========================================================================
-    print("  Step 1: Pre-training all required folds...")
-    all_folds = get_all_required_folds(n_days, p_max, config)
-    print(f"    Total folds needed: {len(all_folds)}")
-
-    total_train_time = 0.0
-    for grid_idx in all_folds:
-        for p in range(1, p_max + 1):
-            _, was_hit, train_time = ensure_fold_trained(
-                cache, grid_idx, p, Y_np, W_np, config, learner_name, n_jobs, verbose
-            )
-            total_train_time += train_time
-
-    print(f"    Training completed in {total_train_time:.2f}s")
-
-    # Initialize storage
-    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=device, dtype=dtype)
-    coefficients = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
-
-    # Initialize SE storage if requested
-    if return_se:
-        standard_errors = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
-    else:
-        standard_errors = None
+    forecasts_all, coefficients, standard_errors, actuals = _fit_orvarx_core(
+        Y=Y,
+        W=W,
+        p_max=p_max,
+        config=config,
+        learner_name=learner_name,
+        n_jobs=n_jobs,
+        verbose=verbose,
+    )
 
     # =========================================================================
-    # Step 2 & 3: For each p, pre-compute residuals and run batched OLS
+    # p-selection via validation RMSE
     # =========================================================================
-    print("  Step 2-3: Pre-computing residuals and running batched OLS...")
-
-    ols_window = config.ols_window
-
-    for p in range(1, p_max + 1):
-        n_treatments = n_assets * p
-
-        # Pre-compute all residuals for this p
-        R_Y_np, R_T_np, first_row, n_residual_rows = precompute_all_residuals(
-            cache, p, Y_np, W_np, config, learner_name, n_jobs, verbose
-        )
-
-        # Convert to torch
-        R_Y = torch.from_numpy(R_Y_np).to(device=device, dtype=dtype)
-        R_T = torch.from_numpy(R_T_np).to(device=device, dtype=dtype)
-
-        # =====================================================================
-        # Batched OLS: Use unfold() to create sliding windows, then batched_ols()
-        # =====================================================================
-        # Window i corresponds to rows [i, i + ols_window) in local coordinates
-        # In absolute terms: [first_row + i, first_row + i + ols_window)
-        # For day_idx, we need rows [day_idx - ols_window, day_idx)
-        # So: first_row + i = day_idx - ols_window
-        #     => i = day_idx - ols_window - first_row
-        #     => day_rel_idx = day_idx - lookback = i + (first_row + ols_window - lookback)
-        # Let offset = first_row + ols_window - lookback
-        # Then: window i <-> day_rel_idx = i + offset
-
-        theta_all = None
-        offset = first_row + ols_window - lookback
-        n_windows = 0
-
-        if n_residual_rows >= ols_window:
-            # Create sliding windows using unfold
-            # R_T: (n_residual_rows, n_treatments) -> unfold -> (n_windows, n_treatments, ols_window)
-            # Transpose to get (n_windows, ols_window, n_treatments) for batched_ols
-            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_treatments)
-            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_assets)
-            n_windows = T_windows.shape[0]
-
-            # Batched OLS with chunking for GPU memory management
-            # theta_all[i] = (T_windows[i]'T_windows[i])^{-1} T_windows[i]'Y_windows[i]
-            try:
-                theta_all = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
-                # theta_all shape: (n_windows, n_treatments, n_assets)
-
-                # Batched SE computation if requested
-                se_all = None
-                if return_se:
-                    # Compute (T'T)^{-1} diagonal elements for all windows
-                    # TtT[i] = T_windows[i]' @ T_windows[i]
-                    TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)  # (n_windows, n_treatments, n_treatments)
-                    TtT_inv = torch.linalg.inv(TtT)  # (n_windows, n_treatments, n_treatments)
-                    TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)  # (n_windows, n_treatments)
-
-                    # Compute residuals and sigma^2 for each window
-                    Y_pred = torch.bmm(T_windows, theta_all)  # (n_windows, ols_window, n_assets)
-                    residuals = Y_windows - Y_pred  # (n_windows, ols_window, n_assets)
-                    RSS = (residuals ** 2).sum(dim=1)  # (n_windows, n_assets)
-                    df = ols_window - n_treatments  # Degrees of freedom
-                    sigma_sq = RSS / df  # (n_windows, n_assets)
-
-                    # SE[i,j,k] = sqrt(TtT_inv_diag[i,j] * sigma_sq[i,k])
-                    se_all = torch.sqrt(TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1))
-                    # se_all shape: (n_windows, n_treatments, n_assets)
-
-                # Store coefficients and SEs for all valid days at once
-                for i in range(n_windows):
-                    day_rel_idx = i + offset
-                    if 0 <= day_rel_idx < n_total_test_days:
-                        theta_reshaped = theta_all[i].view(p, n_assets, n_assets)
-                        coefficients[day_rel_idx, :p, :, :] = theta_reshaped
-
-                        if return_se and se_all is not None:
-                            se_reshaped = se_all[i].view(p, n_assets, n_assets)
-                            standard_errors[day_rel_idx, :p, :, :] = se_reshaped
-
-            except RuntimeError:
-                # Singular matrix encountered - this shouldn't happen with proper residualization
-                # Fall back to per-day OLS would go here, but we skip for now
-                theta_all = None
-
-        # =====================================================================
-        # Forecast generation loop (must stay sequential - model_t.predict dependency)
-        # =====================================================================
-        for day_rel_idx in range(n_total_test_days):
-            day_idx = lookback + day_rel_idx
-
-            # Get theta for this day from batched result
-            window_idx = day_rel_idx - offset
-            if theta_all is None or window_idx < 0 or window_idx >= n_windows:
-                # No valid theta for this day (early days or batched OLS failed)
-                continue
-
-            theta = theta_all[window_idx]  # (n_treatments, n_assets)
-
-            # Generate forecast
-            # Build treatment prediction features: [Y_{day_idx-1}, ..., Y_{day_idx-p}]
-            indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-            treatment_pred = Y[indices, :].reshape(1, n_treatments)
-
-            # Build control features for prediction (lagged only)
-            lagged_indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-            controls_pred = W[lagged_indices, :].reshape(1, n_confounders * p)
-
-            # Get the most recent fold for residualizing prediction
-            active_folds = get_active_folds_for_day(day_idx, p, config)
-            last_fold_idx = max(active_folds)
-            last_fold = cache.get_fold(last_fold_idx, p)
-
-            if last_fold is None:
-                continue
-
-            # Residualize treatment using the last fold's model
-            controls_pred_np = controls_pred.cpu().numpy()
-            treatment_pred_np = treatment_pred.cpu().numpy()
-
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-                T_hat = last_fold.model_t.predict(controls_pred_np)
-
-            T_pred_residual = treatment_pred_np - T_hat
-            T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
-
-            # Compute forecast: T_residual * theta
-            forecast = torch.mm(T_pred_residual_torch, theta).squeeze(0)
-            forecasts_all[day_rel_idx, :, p - 1] = forecast
-
-        if verbose:
-            print(f"    p={p}: completed")
-
-    print("  Step 2-3: Complete")
-
-    # =========================================================================
-    # Step 4: Select optimal p and extract final forecasts
-    # =========================================================================
-    actuals = Y[lookback:, :]  # (n_total_test_days, n_assets)
     p_optimal = select_optimal_p(forecasts_all, actuals, validation_days)
 
     # Extract forecasts at optimal p
