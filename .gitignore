@@ -37,3 +37,6 @@ old-documentation
 Dockerfile
 pyproject.toml
 requirements.txt
+
+# Results files
+results/**/results.pt
