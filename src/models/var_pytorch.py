@@ -26,6 +26,8 @@ Key functions:
 """
 
 import torch
+import numpy as np
+from scipy import stats
 from typing import Tuple, List, Optional
 
 from src.modules.grid_config import GridConfig
@@ -347,6 +349,114 @@ def select_optimal_p(
     p_optimal = torch.argmin(rolling_mse, dim=1) + 1  # (n_output_days,)
 
     return p_optimal
+
+
+def rolling_alpha_selection(
+    forecasts_all_batched: torch.Tensor,  # (n_assets, n_total_test_days, p_max)
+    p_alpha_all: torch.Tensor,            # (n_total_test_days, n_alphas)
+    actuals: torch.Tensor,                # (n_total_test_days, n_assets)
+    validation_days: int,
+    alpha_grid: List[float],
+    verbose: bool = True,
+    use_greek_symbol: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, List[float], torch.Tensor]:
+    """Rolling validation window α-selection for significance-based VAR models.
+
+    For each output day d (where d >= validation_days), selects the optimal α
+    based on MSE over the trailing validation window [d - validation_days, d).
+
+    This is a shared utility used by both ACLE-VARX and ORACLE-VARX.
+
+    Algorithm:
+        1. For each (day, α): lookup forecasts at the p selected for that α
+        2. Compute squared errors vs actuals, averaged over assets
+        3. Use cumsum trick for O(1) rolling window MSE computation
+        4. For each output day, select α with minimum rolling MSE
+
+    Args:
+        forecasts_all_batched: All forecasts, shape (n_assets, n_total_test_days, p_max)
+        p_alpha_all: Selected p for each (day, α), shape (n_total_test_days, n_alphas)
+        actuals: Actual returns, shape (n_total_test_days, n_assets)
+        validation_days: Size of rolling validation window
+        alpha_grid: List of α values (for logging only)
+        verbose: Whether to print α selection statistics
+        use_greek_symbol: If True, use "α" in output; if False, use "alpha"
+
+    Returns:
+        alpha_optimal: Optimal α index for each output day, shape (n_output_days,)
+        alpha_counts: Count of days each α was selected, shape (n_alphas,)
+        alpha_percentages: Percentage of days each α was selected
+        p_optimal_all_days: The p value to use for each output day, shape (n_output_days,)
+
+    Raises:
+        ValueError: If n_total_test_days <= validation_days
+    """
+    n_assets, n_total_test_days, p_max = forecasts_all_batched.shape
+    n_alphas = len(alpha_grid)
+    device = forecasts_all_batched.device
+    dtype = forecasts_all_batched.dtype
+
+    if n_total_test_days <= validation_days:
+        raise ValueError(
+            f"Need n_total_test_days > validation_days, got {n_total_test_days} <= {validation_days}"
+        )
+
+    n_output_days = n_total_test_days - validation_days
+
+    # Step 3a: Precompute forecasts at p_alpha for all (day, α) combinations
+    # forecasts_at_p_alpha[d, α_idx, :] = forecasts_all_batched[:, d, p_alpha_all[d, α_idx] - 1]
+    forecasts_at_p_alpha = torch.zeros(
+        n_total_test_days, n_alphas, n_assets, device=device, dtype=dtype
+    )
+    for alpha_idx in range(n_alphas):
+        for d in range(n_total_test_days):
+            p = p_alpha_all[d, alpha_idx].item()
+            forecasts_at_p_alpha[d, alpha_idx, :] = forecasts_all_batched[:, d, p - 1]
+
+    # Step 3b: Compute squared errors and MSE per (day, α)
+    # actuals: (n_total_test_days, n_assets)
+    # forecasts_at_p_alpha: (n_total_test_days, n_alphas, n_assets)
+    squared_errors = (forecasts_at_p_alpha - actuals.unsqueeze(1)) ** 2
+    mse_per_day_alpha = squared_errors.mean(dim=2)  # (n_total_test_days, n_alphas)
+
+    # Step 3c: Cumsum for O(1) rolling window computation
+    cumsum = mse_per_day_alpha.cumsum(dim=0)  # (n_total_test_days, n_alphas)
+    cumsum_padded = torch.cat([
+        torch.zeros(1, n_alphas, device=device, dtype=dtype),
+        cumsum
+    ], dim=0)  # (n_total_test_days + 1, n_alphas)
+
+    # Step 3d: Rolling α-selection for each output day
+    alpha_optimal = torch.zeros(n_output_days, dtype=torch.long, device=device)
+
+    for d in range(n_output_days):
+        # Output day d corresponds to full test index (validation_days + d)
+        # Validation window: [d, validation_days + d)
+        val_start = d
+        val_end = validation_days + d
+
+        # O(1) rolling MSE via cumsum difference
+        rolling_mse = (cumsum_padded[val_end] - cumsum_padded[val_start]) / validation_days
+        alpha_optimal[d] = torch.argmin(rolling_mse)
+
+    # Compute α statistics
+    alpha_counts = torch.bincount(alpha_optimal, minlength=n_alphas)
+    alpha_percentages = [100.0 * alpha_counts[i].item() / n_output_days for i in range(n_alphas)]
+
+    # Compute p_optimal_all_days: the p value at the optimal α for each output day
+    p_optimal_all_days = torch.zeros(n_output_days, dtype=torch.long, device=device)
+    for d in range(n_output_days):
+        day_idx_full = validation_days + d
+        alpha_star = alpha_optimal[d].item()
+        p_optimal_all_days[d] = p_alpha_all[day_idx_full, alpha_star]
+
+    if verbose:
+        symbol = "α" if use_greek_symbol else "alpha"
+        print(f"\n{symbol}-selection statistics (rolling validation):")
+        for i, alpha in enumerate(alpha_grid):
+            print(f"  {symbol}={alpha}: {alpha_counts[i].item()} days ({alpha_percentages[i]:.1f}%)")
+
+    return alpha_optimal, alpha_counts, alpha_percentages, p_optimal_all_days
 
 
 def fit_var(
