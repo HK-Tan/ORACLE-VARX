@@ -22,6 +22,7 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
+TabPFN_Demo_Local.ipynb
 
 # OS
 .DS_Store
