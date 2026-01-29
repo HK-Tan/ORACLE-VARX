@@ -36,7 +36,7 @@ Thumbs.db
 old-documentation
 Dockerfile
 pyproject.toml
-requirements.txt
+# requirements.txt
 
 # Results files
 results/**/results.pt
