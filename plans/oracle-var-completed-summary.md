@@ -122,19 +122,35 @@ For each α in alpha_grid:
     Store p_α[d, α_idx] = p_selected
 ```
 
-**Phase 3: α Selection via Validation (the ONLY validation)**
+**Phase 3: Rolling α Selection via Validation (the ONLY validation)**
+
+For each output day, α is selected using a **trailing validation window** (rolling α-selection):
+
 ```
-For each α in alpha_grid:
-  forecast_α = forecasts_all[validation_days, :, p_α]
-  RMSE[α] = sqrt(mean((forecast_α - actuals)²))
-α_optimal = argmin(RMSE)
+# Precompute forecasts at p_alpha for all (day, α) combinations
+forecasts_at_p_alpha[d, α, :] = forecasts_all[d, :, p_α[d, α]]
+
+# Compute squared errors and cumsum for O(1) rolling window
+squared_errors = (forecasts_at_p_alpha - actuals)²
+mse_per_day_alpha = squared_errors.mean(dim=assets)
+cumsum = cumsum(mse_per_day_alpha, dim=0)
+
+# For each output day d:
+For d in range(n_output_days):
+  day_idx = validation_days + d
+  val_start, val_end = d, day_idx  # Trailing window [d, day_idx)
+  rolling_mse[α] = (cumsum[val_end] - cumsum[val_start]) / validation_days
+  α_optimal[d] = argmin(rolling_mse)
 ```
+
+This makes `α_optimal` **per-output-day** instead of global.
 
 **Phase 4: Forecast Retrieval and Trimming**
 ```
 For each output day d:
-  p* = p_α[d, α_optimal]
-  forecast[d] = forecasts_all[d, :, p*]
+  α* = α_optimal[d]  # Per-day optimal α
+  p* = p_α[validation_days + d, α*]
+  forecast[d] = forecasts_all[validation_days + d, :, p*]
 n_output_days = n_total_test_days - validation_days
 ```
 
@@ -144,10 +160,11 @@ n_output_days = n_total_test_days - validation_days
 2. **No drift test** - Conceptually flawed (different residualizations make comparison invalid)
 3. **Significance test only** - Test whether new lag-p coefficients are significant
 4. **Benjamini-Hochberg FDR correction** - Required for multiple hypothesis testing
-5. **Batched with PyTorch** - Vectorized, no for loops
-6. **α tuned on validation** - Same approach as p tuning in OR-VARX
+5. **Batched with PyTorch** - Vectorized for expensive Phase 1 & 2
+6. **Rolling α-selection** - Per-day optimal α using trailing validation window (not fixed global α)
 7. **Shared core function** - `_fit_orvarx_core()` eliminates code duplication
 8. **Clean output shape formula** - Same formula for both models
+9. **Efficient memoization** - Phase 1-2 precompute all forecasts/p-selections; Phase 3-4 are O(1) lookups
 
 ## Benefits of Refactoring
 
@@ -173,11 +190,12 @@ python scripts/example_oraclevarx_usage.py
 - Verifies output shapes for all result fields:
   - `forecasts`: Final forecasts `(n_assets, n_output_days)`
   - `forecasts_all`: Forecasts for all alpha values `(n_assets, n_output_days, n_alphas)`
-  - `p_optimal`: Selected lag order per day `(n_output_days,)`
-  - `alpha_optimal`: Selected alpha per day `(n_output_days,)`
+  - `p_optimal`: Selected lag order per day `(n_output_days,)` - varies per day
+  - `alpha_optimal`: Selected alpha index per day `(n_output_days,)` - **varies per day via rolling validation**
   - `alpha_grid`: List of alpha values tested
   - `method`: Should be `"ORACLE-VARX"`
 - Reports timing and pass/fail status for each check
+- Shows α selection statistics (% of days each α was selected)
 
 ### Quick Test
 ```python
@@ -201,5 +219,10 @@ result = fit_oraclevarx_batched(
 # Check output
 print(f"Method: {result.method}")  # 'ORACLE-VARX'
 print(f"Forecasts shape: {result.forecasts.shape}")  # (5, 22)
-print(f"Optimal α: {result.alpha_grid[result.alpha_optimal[0].item()]}")
+print(f"alpha_optimal shape: {result.alpha_optimal.shape}")  # (22,) - per-day!
+
+# α varies across days (rolling selection)
+alpha_counts = torch.bincount(result.alpha_optimal, minlength=len(result.alpha_grid))
+for i, alpha in enumerate(result.alpha_grid):
+    print(f"  α={alpha}: selected {alpha_counts[i].item()} days")
 ```
