@@ -20,7 +20,7 @@ def benchmark_var(
     n_days_list: list,
     n_assets: int = 10,
     config: GridConfig = None,
-    validation_days: int = 20,
+    validation_days: int = 21,
     p_max: int = 10,
     device: str = "cpu",
 ):
@@ -118,7 +118,7 @@ def benchmark_cpu_threads(
     thread_counts: list,
     n_assets: int = 10,
     config: GridConfig = None,
-    validation_days: int = 20,
+    validation_days: int = 21,
     p_max: int = 10,
 ):
     """Benchmark CPU performance across different thread counts.
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     config = GridConfig()
 
     # Test with increasing data sizes
-    # Minimum required: lookback_var + validation_days + 1 = 514 + 20 + 1 = 535
+    # Minimum required: lookback_var + validation_days + 1 = 514 + 21 + 1 = 536
     # For meaningful test period: 514 + 100 = 614
     n_days_list = [600, 800, 1000, 2000]
 
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     # CPU cold start
     Y_cpu_warmup = torch.randn(900, 10, device="cpu")
     start = time.perf_counter()
-    _ = fit_var(Y_cpu_warmup, p_max=10, config=config, validation_days=20)
+    _ = fit_var(Y_cpu_warmup, p_max=10, config=config, validation_days=21)
     cpu_coldstart = time.perf_counter() - start
     print(f"CPU cold start:  {cpu_coldstart:.3f}s")
 
@@ -240,7 +240,7 @@ if __name__ == "__main__":
     if has_cuda:
         Y_cuda_warmup = torch.randn(900, 10, device="cuda")
         start = time.perf_counter()
-        _ = fit_var(Y_cuda_warmup, p_max=10, config=config, validation_days=20)
+        _ = fit_var(Y_cuda_warmup, p_max=10, config=config, validation_days=21)
         torch.cuda.synchronize()
         cuda_coldstart = time.perf_counter() - start
         print(f"CUDA cold start: {cuda_coldstart:.3f}s (includes kernel compilation, memory allocation)")
