@@ -58,6 +58,7 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
         return xgb.XGBRegressor(
             n_jobs=n_jobs,
             tree_method='hist',
+            max_depth=5,
             **kwargs
         )
 
@@ -67,6 +68,7 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
             device='cpu',
             verbose=-1,
             force_col_wise=True,
+            max_depth=5,
             **kwargs
         )
 
