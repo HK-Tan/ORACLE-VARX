@@ -1,0 +1,32 @@
+#!/bin/bash
+set -e  # Exit on any error
+
+echo "=== ORACLE-VARX EC2 Setup ==="
+
+# Clone repo
+echo "[1/4] Cloning repository..."
+git clone https://github.com/HK-Tan/ORACLE-VARX.git
+cd ORACLE-VARX
+
+# Install uv
+echo "[2/4] Installing uv..."
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+
+# Create venv
+echo "[3/4] Creating virtual environment..."
+~/.local/bin/uv venv
+
+# Install dependencies
+echo "[4/4] Installing dependencies..."
+source .venv/bin/activate
+~/.local/bin/uv pip install -r requirements.txt
+
+echo ""
+echo "=== Setup complete! ==="
+echo ""
+echo "Next steps:"
+echo "  cd ORACLE-VARX"
+echo "  source .venv/bin/activate"
+echo "  tmux new -s exp"
+echo "  python scripts/run_oraclevarx_experiment.py --device cpu --no-show --output-dir results/oraclevarx --verbose"

@@ -40,3 +40,6 @@ pyproject.toml
 
 # Results files
 results/**/results.pt
+
+## Documentation
+docs/
