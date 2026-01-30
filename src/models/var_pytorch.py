@@ -403,15 +403,21 @@ def rolling_alpha_selection(
 
     n_output_days = n_total_test_days - validation_days
 
-    # Step 3a: Precompute forecasts at p_alpha for all (day, α) combinations
+    # Step 3a: Precompute forecasts at p_alpha for all (day, α) combinations (vectorized)
     # forecasts_at_p_alpha[d, α_idx, :] = forecasts_all_batched[:, d, p_alpha_all[d, α_idx] - 1]
     forecasts_at_p_alpha = torch.zeros(
         n_total_test_days, n_alphas, n_assets, device=device, dtype=dtype
     )
+
+    # Transpose forecasts for easier gathering: (n_total_test_days, n_assets, p_max)
+    forecasts_transposed = forecasts_all_batched.permute(1, 0, 2)
+
+    # Vectorize over days, loop over alphas (only 7 alphas vs 1000+ days)
     for alpha_idx in range(n_alphas):
-        for d in range(n_total_test_days):
-            p = p_alpha_all[d, alpha_idx].item()
-            forecasts_at_p_alpha[d, alpha_idx, :] = forecasts_all_batched[:, d, p - 1]
+        # p indices for this alpha: (n_total_test_days,) -> expand to (n_total_test_days, n_assets, 1)
+        p_idx = (p_alpha_all[:, alpha_idx] - 1).unsqueeze(1).unsqueeze(2).expand(-1, n_assets, 1)
+        # Gather and squeeze: (n_total_test_days, n_assets)
+        forecasts_at_p_alpha[:, alpha_idx, :] = torch.gather(forecasts_transposed, dim=2, index=p_idx).squeeze(2)
 
     # Step 3b: Compute squared errors and MSE per (day, α)
     # actuals: (n_total_test_days, n_assets)
@@ -443,12 +449,11 @@ def rolling_alpha_selection(
     alpha_counts = torch.bincount(alpha_optimal, minlength=n_alphas)
     alpha_percentages = [100.0 * alpha_counts[i].item() / n_output_days for i in range(n_alphas)]
 
-    # Compute p_optimal_all_days: the p value at the optimal α for each output day
-    p_optimal_all_days = torch.zeros(n_output_days, dtype=torch.long, device=device)
-    for d in range(n_output_days):
-        day_idx_full = validation_days + d
-        alpha_star = alpha_optimal[d].item()
-        p_optimal_all_days[d] = p_alpha_all[day_idx_full, alpha_star]
+    # Compute p_optimal_all_days: the p value at the optimal α for each output day (vectorized)
+    # day_indices maps output day d to full test day (validation_days + d)
+    day_indices = torch.arange(validation_days, n_total_test_days, device=device)
+    # Use advanced indexing: p_alpha_all[day_indices, alpha_optimal] gives (n_output_days,)
+    p_optimal_all_days = p_alpha_all[day_indices, alpha_optimal]
 
     if verbose:
         symbol = "α" if use_greek_symbol else "alpha"

@@ -328,19 +328,20 @@ def fit_oraclevarx_batched(
     # n_output_days = n_total_test_days - validation_days (CLEAN formula!)
     # Already computed and validated at the start of the function
 
-    # Extract forecasts for output days
+    # Extract forecasts for output days (vectorized)
     # For each output day d, retrieve forecast at (α_optimal[d], p_optimal[d])
     # alpha_optimal and p_optimal_all_days are already indexed for output days (n_output_days,)
-    forecasts_output = torch.zeros(n_output_days, n_assets, device=device, dtype=dtype)
 
-    for d in range(n_output_days):
-        day_idx_full = validation_days + d  # Index in full test data
-        p_selected = p_optimal_all_days[d].item()  # p_optimal_all_days is (n_output_days,)
-        # Retrieve forecast from forecasts_all_batched
-        forecasts_output[d, :] = forecasts_all_batched[:, day_idx_full, p_selected - 1]
+    # Slice forecasts to output days only: (n_assets, n_output_days, p_max)
+    forecasts_sliced = forecasts_all_batched[:, validation_days:, :]
 
-    # Transpose to match ORACLEVARXResult expected shape: (n_assets, n_output_days)
-    forecasts_final = forecasts_output.T
+    # Build gather indices: p_optimal_all_days - 1 (convert to 0-indexed)
+    # Shape: (n_assets, n_output_days, 1) for gathering along p_max dimension
+    p_indices = (p_optimal_all_days - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
+
+    # Gather forecasts at optimal p for each day
+    # forecasts_final shape: (n_assets, n_output_days)
+    forecasts_final = torch.gather(forecasts_sliced, dim=2, index=p_indices).squeeze(-1)
 
     # =========================================================================
     # Construct forecasts_all for ORACLEVARXResult
@@ -349,11 +350,16 @@ def fit_oraclevarx_batched(
     # For each (day, α), we need the forecast at p_α[day, α]
     forecasts_all = torch.zeros(n_assets, n_output_days, n_alphas, device=device, dtype=dtype)
 
+    # Pre-slice forecasts to output days: (n_assets, n_output_days, p_max)
+    forecasts_sliced = forecasts_all_batched[:, validation_days:, :]
+    # Get p values for output days: (n_output_days, n_alphas)
+    p_alpha_output = p_alpha_all[validation_days:, :]
+
+    # Vectorize over days, loop over alphas (only 7 alphas vs 1000+ days)
     for alpha_idx in range(n_alphas):
-        for d in range(n_output_days):
-            day_idx_full = validation_days + d
-            p_selected = p_alpha_all[day_idx_full, alpha_idx].item()
-            forecasts_all[:, d, alpha_idx] = forecasts_all_batched[:, day_idx_full, p_selected - 1]
+        # p indices for this alpha across all days: (n_output_days,) -> expand to (n_assets, n_output_days, 1)
+        p_idx = (p_alpha_output[:, alpha_idx] - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
+        forecasts_all[:, :, alpha_idx] = torch.gather(forecasts_sliced, dim=2, index=p_idx).squeeze(-1)
 
     # =========================================================================
     # Construct coefficients_all for ORACLEVARXResult
