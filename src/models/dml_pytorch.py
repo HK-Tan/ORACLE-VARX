@@ -599,7 +599,14 @@ def fit_orvarx_single_day(
     T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
 
     # Compute causal effect: T_residual * theta
-    forecast = torch.mm(T_pred_residual_torch, theta).squeeze(0)  # (n_assets,)
+    causal_effect = torch.mm(T_pred_residual_torch, theta).squeeze(0)  # (n_assets,)
+
+    # Add confounder baseline E[Y|W] for full forecast
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning)
+        Y_baseline_np = last_fold.model_y.predict(controls_pred_np)
+    Y_baseline = torch.from_numpy(Y_baseline_np).to(device=device, dtype=dtype).squeeze(0)
+    forecast = Y_baseline + causal_effect
 
     return forecast, theta, se, stats
 
@@ -979,8 +986,15 @@ def _fit_orvarx_core(
             T_pred_residual = treatment_pred_np - T_hat
             T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
 
-            # Compute forecast: T_residual * theta
-            forecast = torch.mm(T_pred_residual_torch, theta).squeeze(0)
+            # Compute causal effect: T_residual * theta
+            causal_effect = torch.mm(T_pred_residual_torch, theta).squeeze(0)
+
+            # Add confounder baseline E[Y|W] for full forecast
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
+                Y_baseline_np = last_fold.model_y.predict(controls_pred_np)
+            Y_baseline = torch.from_numpy(Y_baseline_np).to(device=device, dtype=dtype).squeeze(0)
+            forecast = Y_baseline + causal_effect
             forecasts_all[day_rel_idx, :, p - 1] = forecast
 
         if verbose:
