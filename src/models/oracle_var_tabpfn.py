@@ -639,6 +639,10 @@ def fit_oraclevarx_tabpfn(
                   f"VRAM: {used:.1f}/{total:.1f} GB ({pct:.0f}%), "
                   f"residuals: {R_Y.shape}, forecast days: {len(forecast_Y_preds[p])}")
 
+        # Delete fold_data for this p to free memory (minimizes peak memory)
+        del fold_data[p]
+        gc.collect()
+
     # Clear TabPFN cache to free GPU memory
     tabpfn.clear_cache()
 

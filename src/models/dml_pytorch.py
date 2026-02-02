@@ -24,6 +24,7 @@ References:
     and structural parameters." The Econometrics Journal.
 """
 
+import gc
 import os
 import time
 import warnings
@@ -35,7 +36,6 @@ from typing import Tuple, List, Optional, Any, Dict, Union
 from src.results import VARXResult
 from src.modules.grid_config import GridConfig
 from src.models.var_pytorch import select_optimal_p
-from src.modules.model_cache import ModelCache, FoldModels
 from src.modules.factory import get_regressor, get_multi_output_regressor
 from src.modules.batch_utils import batched_ols
 
@@ -176,6 +176,13 @@ def get_physical_cpu_count() -> int:
         return max(1, logical // 2)
 
 
+def _clear_memory():
+    """Force memory cleanup (CPU and GPU if available)."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # =============================================================================
 # Grid-Based Functions
 # =============================================================================
@@ -314,301 +321,237 @@ def _build_lagged_features(
     return outcome, treatment, controls
 
 
-def ensure_fold_trained(
-    cache: ModelCache,
-    grid_idx: int,
-    p: int,
+def _build_test_features(
     Y: np.ndarray,
     W: np.ndarray,
-    config: GridConfig,
-    learner_name: str = 'xgboost',
-    n_jobs: int = -1,
-    verbose: bool = False,
-) -> Tuple[FoldModels, bool, float]:
-    """Ensure a fold is trained and cached; train if not present.
+    p: int,
+    test_start: int,
+    test_end: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build test features allowing lags from BEFORE test_start.
 
-    Checks the cache for the specified fold and lag order. If not found,
-    trains new models and adds them to the cache.
+    Unlike _build_lagged_features which requires p "burn-in" rows,
+    this function predicts ALL rows in [test_start, test_end) by
+    sourcing lags from [test_start - p, test_end - 1].
 
     Args:
-        cache: ModelCache instance
-        grid_idx: Grid fold index
-        p: Lag order
         Y: Full Y array, shape (n_days, n_assets)
         W: Full W array, shape (n_days, n_confounders)
-        config: GridConfig instance
-        learner_name: Name of the learner to use
-        n_jobs: Number of CPU cores (-1 for all, 5 recommended)
-        verbose: If True, print training details for cache misses
-
-    Returns:
-        Tuple of (FoldModels, was_cache_hit, train_time)
-        - FoldModels: trained models and boundaries
-        - was_cache_hit: True if model was retrieved from cache
-        - train_time: Training time in seconds (0.0 if cache hit)
-    """
-    # Check cache first
-    cached = cache.get_fold(grid_idx, p)
-    if cached is not None:
-        return cached, True, 0.0
-
-    # Compute boundaries
-    train_start, train_end, test_start, test_end = compute_fold_boundaries(grid_idx, config)
-
-    # Validate boundaries against data size
-    n_days = Y.shape[0]
-    if train_end > n_days:
-        raise ValueError(
-            f"Fold {grid_idx} train_end {train_end} exceeds data size {n_days}"
-        )
-
-    # Build lagged features for training data
-    # We need p extra rows at the start for lagging
-    outcome_train, treatment_train, controls_train = _build_lagged_features(
-        Y, W, p, train_start, train_end
-    )
-
-    # Train models using MultiOutputRegressor
-    train_start_time = time.time()
-    model_y = get_multi_output_regressor(learner_name, n_jobs=n_jobs)
-    model_t = get_multi_output_regressor(learner_name, n_jobs=n_jobs)
-
-    model_y.fit(controls_train, outcome_train)
-    model_t.fit(controls_train, treatment_train)
-    train_elapsed = time.time() - train_start_time
-
-    if verbose:
-        print(f"    Training fold={grid_idx}, p={p}... {train_elapsed:.2f}s")
-
-    # Create FoldModels
-    fold = FoldModels(
-        model_y=model_y,
-        model_t=model_t,
-        train_start=train_start,
-        train_end=train_end,
-        test_start=test_start,
-        test_end=test_end,
-        p=p,
-    )
-
-    # Add to cache
-    cache.add_fold(grid_idx, p, fold)
-
-    return fold, False, train_elapsed
-
-
-def compute_residuals(
-    cache: ModelCache,
-    day_idx: int,
-    p: int,
-    Y: np.ndarray,
-    W: np.ndarray,
-    config: GridConfig,
-    learner_name: str = 'xgboost',
-    n_jobs: int = -1,
-    verbose: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """Compute residuals for a day using cached fold models.
-
-    For each active fold, predicts on the test rows and computes residuals.
-    Only returns residuals from test windows (not the training portion).
-
-    Note: The first train_size rows of the lookback window have no test residuals
-    because they're only used for training the first fold. This is by design -
-    DML cross-fitting only uses test fold residuals for the second-stage OLS.
-
-    Args:
-        cache: ModelCache instance
-        day_idx: Current day index
         p: Lag order
-        Y: Full Y array, shape (n_days, n_assets)
-        W: Full W array, shape (n_days, n_confounders)
-        config: GridConfig instance
-        learner_name: Name of the learner
-        n_jobs: Number of CPU cores (-1 for all, 5 recommended)
-        verbose: If True, print training details for cache misses
+        test_start: First row to predict (inclusive)
+        test_end: Last row to predict (exclusive)
 
     Returns:
-        Tuple of (Y_residuals, T_residuals, stats) where:
-        - Y_residuals, T_residuals: numpy arrays of residuals
-        - stats: dict with 'cache_hits', 'cache_misses', 'total_train_time'
+        outcome: Y values, shape (n_rows, n_assets) where n_rows = test_end - test_start
+        treatment: Lagged Y values, shape (n_rows, n_assets * p)
+        controls: Lagged W values, shape (n_rows, n_confounders * p)
     """
-    # Get active folds for this day
-    active_folds = get_active_folds_for_day(day_idx, p, config)
-
-    # Collect residuals from all active folds
-    Y_residuals_list = []
-    T_residuals_list = []
-
-    # Determine the lookback window boundaries
-    lookback_start = day_idx - config.lookback_orvarx
-    row_end_abs = day_idx
-
-    # Track cache stats
-    cache_hits = 0
-    cache_misses = 0
-    total_train_time = 0.0
-
-    for grid_idx in active_folds:
-        # Ensure fold is trained
-        fold, was_hit, train_time = ensure_fold_trained(
-            cache, grid_idx, p, Y, W, config, learner_name, n_jobs, verbose
-        )
-
-        if was_hit:
-            cache_hits += 1
-        else:
-            cache_misses += 1
-            total_train_time += train_time
-
-        # Determine fold's test window rows
-        # Test window covers absolute rows [test_start + p, test_end)
-        # (we need p rows for lagging, so actual outcome rows start at test_start + p)
-        fold_test_row_start = fold.test_start + p
-        fold_test_row_end = min(fold.test_end, Y.shape[0])  # Clamp to data size
-
-        # Only use rows within our lookback window
-        overlap_start = max(lookback_start + p, fold_test_row_start)
-        overlap_end = min(row_end_abs, fold_test_row_end)
-
-        if overlap_start >= overlap_end:
-            continue  # No overlap with lookback window
-
-        # Build lagged features for this overlap
-        outcome_test, treatment_test, controls_test = _build_lagged_features(
-            Y, W, p, overlap_start - p, overlap_end
-        )
-
-        # Predict (suppress sklearn feature name mismatch warnings)
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning)
-            Y_pred = fold.model_y.predict(controls_test)
-            T_pred = fold.model_t.predict(controls_test)
-
-        # Compute residuals
-        Y_res = outcome_test - Y_pred
-        T_res = treatment_test - T_pred
-
-        Y_residuals_list.append(Y_res)
-        T_residuals_list.append(T_res)
-
-    if not Y_residuals_list:
-        raise RuntimeError(
-            f"No residuals computed for day {day_idx}, p={p}. "
-            f"active_folds={active_folds}"
-        )
-
-    # Concatenate all residuals
-    Y_residuals = np.vstack(Y_residuals_list)
-    T_residuals = np.vstack(T_residuals_list)
-
-    stats = {
-        'cache_hits': cache_hits,
-        'cache_misses': cache_misses,
-        'total_train_time': total_train_time,
-    }
-
-    return Y_residuals, T_residuals, stats
-
-
-def fit_orvarx_single_day(
-    Y: torch.Tensor,
-    W: torch.Tensor,
-    p: int,
-    day_idx: int,
-    cache: ModelCache,
-    config: GridConfig,
-    learner_name: str = 'xgboost',
-    n_jobs: int = -1,
-    verbose: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
-    """Fit OR-VARX for a single day and lag order using cached models.
-
-    Performs the DML pipeline:
-    1. Build DML data (outcome, treatment, controls)
-    2. Compute residuals using cached models
-    3. Estimate deconfounded coefficients theta
-    4. Compute standard errors
-    5. Generate prediction
-
-    Args:
-        Y: Asset returns, shape (n_days, n_assets)
-        W: Confounders, shape (n_days, n_confounders)
-        p: Lag order
-        day_idx: Current day index
-        cache: ModelCache instance for caching models
-        config: GridConfig instance
-        learner_name: First-stage learner (default: 'xgboost')
-        n_jobs: Number of CPU cores (-1 for all, 5 recommended)
-        verbose: If True, print training details for cache misses
-
-    Returns:
-        forecast: Prediction for day_idx, shape (n_assets,)
-        theta: Deconfounded coefficients, shape (n_treatments, n_assets)
-        se: Standard errors, shape (n_treatments, n_assets)
-        stats: Dict with cache stats ('cache_hits', 'cache_misses', 'total_train_time')
-    """
-    device = Y.device
-    dtype = Y.dtype
     n_assets = Y.shape[1]
     n_confounders = W.shape[1]
+    n_rows = test_end - test_start
 
-    # Convert full data to numpy for sklearn models
-    Y_np = Y.cpu().numpy()
-    W_np = W.cpu().numpy()
+    # Outcome: Y[test_start : test_end]
+    outcome = Y[test_start:test_end]
 
-    # Compute residuals using cached models
-    Y_residuals_np, T_residuals_np, stats = compute_residuals(
-        cache, day_idx, p, Y_np, W_np, config, learner_name, n_jobs, verbose
-    )
+    # Treatment: lagged Y values (can go before test_start)
+    treatment = np.zeros((n_rows, n_assets * p), dtype=np.float32)
+    for lag in range(1, p + 1):
+        lag_start = test_start - lag
+        lag_end = test_end - lag
+        treatment[:, (lag - 1) * n_assets:lag * n_assets] = Y[lag_start:lag_end]
 
-    # Convert back to torch
-    Y_residuals = torch.from_numpy(Y_residuals_np).to(device=device, dtype=dtype)
-    T_residuals = torch.from_numpy(T_residuals_np).to(device=device, dtype=dtype)
+    # Controls: lagged W values (can go before test_start)
+    controls = np.zeros((n_rows, n_confounders * p), dtype=np.float32)
+    for lag in range(1, p + 1):
+        lag_start = test_start - lag
+        lag_end = test_end - lag
+        controls[:, (lag - 1) * n_confounders:lag * n_confounders] = W[lag_start:lag_end]
 
-    # Estimate deconfounded coefficients
-    theta = estimate_theta(Y_residuals, T_residuals)
+    return outcome, treatment, controls
 
-    # Compute standard errors
-    se = compute_se_oracle(theta, Y_residuals, T_residuals)
 
-    # Generate prediction for day_idx
-    # Build treatment features: [Y_{day_idx-1}, ..., Y_{day_idx-p}]
-    indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-    treatment_pred = Y[indices, :].reshape(1, n_assets * p)  # (1, n_assets * p)
+def _build_forecast_controls(W: np.ndarray, day_idx: int, p: int) -> np.ndarray:
+    """Build lagged control features for a single forecast day.
 
-    # Build control features for prediction (lagged only)
-    lagged_indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-    controls_pred = W[lagged_indices, :].reshape(1, n_confounders * p)  # (1, n_confounders * p)
+    For forecasting day_idx, we need W values at [day_idx-1, ..., day_idx-p].
 
-    # Get the most recent fold for this day to residualize prediction
-    # Use the last active fold (most recent)
-    active_folds = get_active_folds_for_day(day_idx, p, config)
-    last_fold_idx = max(active_folds)
-    last_fold = cache.get_fold(last_fold_idx, p)
+    Args:
+        W: Full W array, shape (n_days, n_confounders)
+        day_idx: The day index to forecast (absolute index)
+        p: Lag order
 
-    # Residualize treatment using the last fold's model
-    controls_pred_np = controls_pred.cpu().numpy()
-    treatment_pred_np = treatment_pred.cpu().numpy()
+    Returns:
+        controls: Lagged W values, shape (n_confounders * p,)
+    """
+    n_confounders = W.shape[1]
+    controls = np.zeros(n_confounders * p, dtype=np.float32)
+    for lag in range(1, p + 1):
+        controls[(lag - 1) * n_confounders:lag * n_confounders] = W[day_idx - lag]
+    return controls
 
-    # Predict (suppress sklearn feature name mismatch warnings)
-    with warnings.catch_warnings():
-        warnings.filterwarnings('ignore', category=UserWarning)
-        T_hat = last_fold.model_t.predict(controls_pred_np)
-    T_pred_residual = treatment_pred_np - T_hat
-    T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
 
-    # Compute causal effect: T_residual * theta
-    causal_effect = torch.mm(T_pred_residual_torch, theta).squeeze(0)  # (n_assets,)
+def _prepare_all_fold_data(
+    Y_np: np.ndarray,
+    W_np: np.ndarray,
+    all_folds: List[int],
+    p_max: int,
+    config: GridConfig,
+) -> Dict[int, List[Dict[str, Any]]]:
+    """Pre-compute fold data (training/test features) for all folds and p values.
 
-    # Add confounder baseline E[Y|W] for full forecast
-    with warnings.catch_warnings():
-        warnings.filterwarnings('ignore', category=UserWarning)
-        Y_baseline_np = last_fold.model_y.predict(controls_pred_np)
-    Y_baseline = torch.from_numpy(Y_baseline_np).to(device=device, dtype=dtype).squeeze(0)
-    forecast = Y_baseline + causal_effect
+    This follows the TabPFN pattern of pre-computing all data before training.
+    The returned dict is keyed by p, with each value being a list of fold data dicts.
 
-    return forecast, theta, se, stats
+    Args:
+        Y_np: Full Y array, shape (n_days, n_assets)
+        W_np: Full W array, shape (n_days, n_confounders)
+        all_folds: List of grid fold indices to process
+        p_max: Maximum lag order
+        config: GridConfig instance
+
+    Returns:
+        Dict[p] -> List of fold data dicts with keys:
+            'grid_idx', 'X_train', 'Y_train', 'T_train',
+            'X_test', 'Y_test', 'T_test',
+            'test_start', 'test_end',
+            'forecast_controls', 'forecast_day_indices'
+    """
+    n_days = Y_np.shape[0]
+
+    fold_data: Dict[int, List[Dict[str, Any]]] = {p: [] for p in range(1, p_max + 1)}
+
+    for grid_idx in all_folds:
+        train_start, train_end, test_start, test_end = compute_fold_boundaries(grid_idx, config)
+
+        # Clamp to data size
+        if train_end > n_days:
+            continue
+        test_end = min(test_end, n_days)
+
+        for p in range(1, p_max + 1):
+            # Build training data
+            outcome_train, treatment_train, controls_train = _build_lagged_features(
+                Y_np, W_np, p, train_start, train_end
+            )
+
+            # Check if we have enough history for lags (need data at test_start - p)
+            if test_start - p < 0:
+                continue
+
+            # Use _build_test_features that allows lags from before test_start
+            outcome_test, treatment_test, controls_test = _build_test_features(
+                Y_np, W_np, p, test_start, test_end
+            )
+
+            # Collect forecast control features for test days in this fold's window
+            forecast_controls = []
+            forecast_day_indices = []
+            for test_day_idx in range(test_start, test_end):
+                fc = _build_forecast_controls(W_np, test_day_idx, p)
+                forecast_controls.append(fc)
+                forecast_day_indices.append(test_day_idx)
+
+            fold_data[p].append({
+                'grid_idx': grid_idx,
+                'X_train': controls_train,
+                'Y_train': outcome_train,
+                'T_train': treatment_train,
+                'X_test': controls_test,
+                'Y_test': outcome_test,
+                'T_test': treatment_test,
+                'test_start': test_start,
+                'test_end': test_end,
+                'forecast_controls': forecast_controls,
+                'forecast_day_indices': forecast_day_indices,
+            })
+
+    return fold_data
+
+
+def _process_folds_for_p(
+    folds_p: List[Dict[str, Any]],
+    Y_np: np.ndarray,
+    n_assets: int,
+    p: int,
+    learner_name: str,
+    n_jobs: int,
+    verbose: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, int, Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+    """Train-predict-discard for all folds at a single p value.
+
+    This is the memory-efficient core: train models, get predictions,
+    DELETE models immediately after use.
+
+    Args:
+        folds_p: List of fold data dicts for this p
+        Y_np: Full Y array (for building treatment features)
+        n_assets: Number of assets
+        p: Lag order
+        learner_name: Name of the sklearn learner
+        n_jobs: Number of CPU cores
+        verbose: Print progress
+
+    Returns:
+        Tuple of:
+        - R_Y: Residualized outcomes, shape (n_residual_rows, n_assets)
+        - R_T: Residualized treatments, shape (n_residual_rows, n_treatments)
+        - first_row: Absolute row index of first residual row
+        - forecast_Y_preds: Dict[day_idx -> prediction array]
+        - forecast_T_preds: Dict[day_idx -> prediction array]
+    """
+    if not folds_p:
+        raise ValueError(f"No folds provided for p={p}")
+
+    n_treatments = n_assets * p
+
+    # Determine global row range
+    first_row = min(f['test_start'] for f in folds_p)
+    last_row = max(f['test_end'] for f in folds_p)
+    n_rows = last_row - first_row
+
+    # Allocate contiguous arrays for residuals
+    R_Y = np.zeros((n_rows, n_assets), dtype=np.float32)
+    R_T = np.zeros((n_rows, n_treatments), dtype=np.float32)
+
+    # Storage for forecast predictions
+    forecast_Y_preds: Dict[int, np.ndarray] = {}
+    forecast_T_preds: Dict[int, np.ndarray] = {}
+
+    for fold_idx, fold in enumerate(folds_p):
+        # Train models
+        model_y = get_multi_output_regressor(learner_name, n_jobs=n_jobs)
+        model_t = get_multi_output_regressor(learner_name, n_jobs=n_jobs)
+
+        model_y.fit(fold['X_train'], fold['Y_train'])
+        model_t.fit(fold['X_train'], fold['T_train'])
+
+        # Predict on test data (suppress sklearn warnings)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=UserWarning)
+            Y_pred = model_y.predict(fold['X_test'])
+            T_pred = model_t.predict(fold['X_test'])
+
+        # Compute residuals
+        local_start = fold['test_start'] - first_row
+        local_end = fold['test_end'] - first_row
+        R_Y[local_start:local_end] = fold['Y_test'] - Y_pred
+        R_T[local_start:local_end] = fold['T_test'] - T_pred
+
+        # Predict for forecast days
+        for local_idx, day_idx in enumerate(fold['forecast_day_indices']):
+            fc = fold['forecast_controls'][local_idx].reshape(1, -1)
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
+                forecast_Y_preds[day_idx] = model_y.predict(fc).squeeze(0)
+                forecast_T_preds[day_idx] = model_t.predict(fc).squeeze(0)
+
+        # DELETE models immediately to free memory
+        del model_y, model_t
+
+        if verbose and (fold_idx + 1) % 5 == 0:
+            print(f"      p={p}: processed {fold_idx + 1}/{len(folds_p)} folds")
+
+    return R_Y, R_T, first_row, forecast_Y_preds, forecast_T_preds
 
 
 # =============================================================================
@@ -657,122 +600,6 @@ def get_all_required_folds(
     return sorted(all_folds)
 
 
-def precompute_all_residuals(
-    cache: ModelCache,
-    p: int,
-    Y: np.ndarray,
-    W: np.ndarray,
-    config: GridConfig,
-    learner_name: str = 'xgboost',
-    n_jobs: int = -1,
-    verbose: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, int, int]:
-    """Pre-compute residuals for all test windows at a given lag order.
-
-    For each fold that has been trained, compute residuals for its ENTIRE
-    test window. Store residuals indexed by absolute row position.
-
-    Args:
-        cache: ModelCache with pre-trained models
-        p: Lag order
-        Y: Full Y array, shape (n_days, n_assets)
-        W: Full W array, shape (n_days, n_confounders)
-        config: GridConfig instance
-        learner_name: Learner name (for training if needed)
-        n_jobs: Number of CPU cores
-        verbose: Print progress
-
-    Returns:
-        Tuple of (R_Y, R_T, first_row, n_rows) where:
-        - R_Y: Residualized outcomes, shape (n_residual_rows, n_assets)
-        - R_T: Residualized treatments, shape (n_residual_rows, n_treatments)
-        - first_row: Absolute row index of first residual row
-        - n_rows: Number of residual rows
-
-    Notes:
-        - Only computes residuals from test windows (DML cross-fitting)
-        - Residuals are stored contiguously; use first_row to map to absolute indices
-        - The first train_size rows have no residuals (training portion)
-    """
-    n_days = Y.shape[0]
-    n_assets = Y.shape[1]
-    n_confounders = W.shape[1]
-    n_treatments = n_assets * p
-
-    # Get all trained folds for this p
-    all_grid_indices = cache.get_all_trained_folds(p)
-
-    if not all_grid_indices:
-        raise RuntimeError(f"No trained folds found for p={p}")
-
-    # Collect residuals from all folds
-    residual_chunks = []
-    first_row_global = None
-
-    for grid_idx in sorted(all_grid_indices):
-        fold = cache.get_fold(grid_idx, p)
-        if fold is None:
-            continue
-
-        # Compute fold's test window rows (accounting for lags)
-        # Outcome rows start at test_start + p (need p rows for lags)
-        fold_test_row_start = fold.test_start + p
-        fold_test_row_end = min(fold.test_end, n_days)
-
-        if fold_test_row_start >= fold_test_row_end:
-            continue  # No valid test rows
-
-        # Track the first row across all folds
-        if first_row_global is None:
-            first_row_global = fold_test_row_start
-        else:
-            first_row_global = min(first_row_global, fold_test_row_start)
-
-        # Build lagged features for entire test window
-        outcome_test, treatment_test, controls_test = _build_lagged_features(
-            Y, W, p, fold.test_start, fold_test_row_end
-        )
-
-        # Predict (suppress sklearn warnings)
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning)
-            Y_pred = fold.model_y.predict(controls_test)
-            T_pred = fold.model_t.predict(controls_test)
-
-        # Compute residuals
-        Y_res = outcome_test - Y_pred
-        T_res = treatment_test - T_pred
-
-        # Store with row indices
-        residual_chunks.append({
-            'start_row': fold_test_row_start,
-            'end_row': fold_test_row_end,
-            'Y_res': Y_res,
-            'T_res': T_res,
-        })
-
-    if not residual_chunks:
-        raise RuntimeError(f"No residuals computed for p={p}")
-
-    # Determine global row range
-    first_row = min(chunk['start_row'] for chunk in residual_chunks)
-    last_row = max(chunk['end_row'] for chunk in residual_chunks)
-    n_rows = last_row - first_row
-
-    # Allocate contiguous arrays
-    R_Y = np.zeros((n_rows, n_assets), dtype=np.float32)
-    R_T = np.zeros((n_rows, n_treatments), dtype=np.float32)
-
-    # Fill in residuals (some positions may be overwritten if folds overlap)
-    for chunk in residual_chunks:
-        local_start = chunk['start_row'] - first_row
-        local_end = chunk['end_row'] - first_row
-        R_Y[local_start:local_end] = chunk['Y_res']
-        R_T[local_start:local_end] = chunk['T_res']
-
-    return R_Y, R_T, first_row, n_rows
-
-
 def _fit_orvarx_core(
     Y: torch.Tensor,
     W: torch.Tensor,
@@ -786,9 +613,14 @@ def _fit_orvarx_core(
 
     This is the shared computation layer used by both fit_orvarx_batched() and
     fit_oraclevarx_batched(). It performs:
-    1. Pre-training all required grid folds
-    2. Pre-computing residuals for all test windows
+    1. Pre-computing fold data (training/test features) for all folds
+    2. Train-predict-discard: train models, get predictions, delete models immediately
     3. Batched OLS for all days and all lags
+
+    Memory-Efficient Design:
+    - Models are deleted immediately after predictions are computed
+    - Fold data is deleted for each p after processing
+    - Only residuals and forecast predictions are retained
 
     The function returns raw data for ALL test days without any trimming or
     p-selection. Callers are responsible for:
@@ -815,7 +647,11 @@ def _fit_orvarx_core(
         - Returns ALL test days (n_days - lookback), no trimming
         - Always computes standard errors (needed by both callers)
         - Does NOT perform p-selection
+        - Memory efficient: ~1.5 GB peak vs 20-100 GB with model caching
     """
+    import time
+    t0 = time.time()
+
     # Use default config if not provided
     if config is None:
         config = GridConfig()
@@ -840,11 +676,8 @@ def _fit_orvarx_core(
     dtype = Y.dtype
 
     # Convert to numpy for sklearn models
-    Y_np = Y.cpu().numpy()
-    W_np = W.cpu().numpy()
-
-    # Create model cache
-    cache = ModelCache(n_assets=n_assets, n_confounders=n_confounders, p_max=p_max)
+    Y_np = Y.cpu().numpy().astype(np.float32)
+    W_np = W.cpu().numpy().astype(np.float32)
 
     n_cpus = get_physical_cpu_count()
     n_jobs_resolved = max(1, n_cpus - 1) if n_jobs == -1 else n_jobs
@@ -853,157 +686,173 @@ def _fit_orvarx_core(
     print(f"  Using {n_jobs_resolved} CPU cores ({n_cpus} physical cores available)")
 
     # =========================================================================
-    # Step 1: Determine and pre-train all required folds
+    # Step 1: Determine all required folds and prepare fold data
     # =========================================================================
-    print("    Step 1: Pre-training all required folds...")
+    print("    Step 1: Preparing fold data...")
     all_folds = get_all_required_folds(n_days, p_max, config)
     print(f"      Total folds needed: {len(all_folds)}")
 
-    total_train_time = 0.0
-    n_folds = len(all_folds)
-    for fold_num, grid_idx in enumerate(all_folds):
-        for p in range(1, p_max + 1):
-            _, was_hit, train_time = ensure_fold_trained(
-                cache, grid_idx, p, Y_np, W_np, config, learner_name, n_jobs, verbose
-            )
-            total_train_time += train_time
-        # Progress every 10 folds (or first/last)
-        if fold_num == 0 or (fold_num + 1) % 10 == 0 or fold_num == n_folds - 1:
-            print(f"      Fold {fold_num + 1}/{n_folds} done ({total_train_time:.1f}s elapsed)", flush=True)
-
-    print(f"      Training completed in {total_train_time:.2f}s")
+    fold_data = _prepare_all_fold_data(Y_np, W_np, all_folds, p_max, config)
+    print(f"      Built data for {sum(len(v) for v in fold_data.values())} fold-p combinations")
 
     # Initialize storage for ALL test days (no trimming)
     forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=device, dtype=dtype)
     coefficients = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
     standard_errors = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
 
+    # Storage for residuals and forecast predictions (matches TabPFN pattern)
+    R_Y_all: Dict[int, np.ndarray] = {}
+    R_T_all: Dict[int, np.ndarray] = {}
+    first_residual_row: Dict[int, int] = {}
+    forecast_Y_preds: Dict[int, Dict[int, np.ndarray]] = {p: {} for p in range(1, p_max + 1)}
+    forecast_T_preds: Dict[int, Dict[int, np.ndarray]] = {p: {} for p in range(1, p_max + 1)}
+
     # =========================================================================
-    # Step 2 & 3: For each p, pre-compute residuals and run batched OLS
+    # Step 2: Train-predict-discard for each p value
     # =========================================================================
-    print("    Step 2-3: Pre-computing residuals and running batched OLS...")
+    print("    Step 2: Training models and computing predictions...")
+
+    total_train_time = 0.0
+    for p in range(1, p_max + 1):
+        folds_p = fold_data[p]
+        if not folds_p:
+            continue
+
+        p_start = time.time()
+
+        # Train-predict-discard for all folds at this p
+        R_Y, R_T, first_row, forecast_Y_p, forecast_T_p = _process_folds_for_p(
+            folds_p, Y_np, n_assets, p, learner_name, n_jobs_resolved, verbose
+        )
+
+        # Store residuals and predictions
+        R_Y_all[p] = R_Y
+        R_T_all[p] = R_T
+        first_residual_row[p] = first_row
+        forecast_Y_preds[p] = forecast_Y_p
+        forecast_T_preds[p] = forecast_T_p
+
+        p_elapsed = time.time() - p_start
+        total_train_time += p_elapsed
+
+        # Delete fold_data for this p to free memory
+        del fold_data[p]
+        _clear_memory()
+
+        if verbose or p == 1 or p == p_max:
+            print(f"      p={p}: {len(folds_p)} folds, {R_Y.shape[0]} residual rows, "
+                  f"{len(forecast_Y_p)} forecast days ({p_elapsed:.1f}s)")
+
+    print(f"      Training completed in {total_train_time:.1f}s")
+
+    # =========================================================================
+    # Step 3: Batched OLS for all days and all lags
+    # =========================================================================
+    print("    Step 3: Running batched OLS...")
 
     ols_window = config.ols_window
 
     for p in range(1, p_max + 1):
+        if p not in R_Y_all:
+            continue
+
         n_treatments = n_assets * p
 
-        # Pre-compute all residuals for this p
-        R_Y_np, R_T_np, first_row, n_residual_rows = precompute_all_residuals(
-            cache, p, Y_np, W_np, config, learner_name, n_jobs, verbose
-        )
+        # Convert residuals to torch
+        R_Y = torch.from_numpy(R_Y_all[p]).to(device=device, dtype=dtype)
+        R_T = torch.from_numpy(R_T_all[p]).to(device=device, dtype=dtype)
+        first_row = first_residual_row[p]
+        n_residual_rows = R_Y.shape[0]
 
-        # Convert to torch
-        R_Y = torch.from_numpy(R_Y_np).to(device=device, dtype=dtype)
-        R_T = torch.from_numpy(R_T_np).to(device=device, dtype=dtype)
-
-        # =====================================================================
-        # Batched OLS: Use unfold() to create sliding windows, then batched_ols()
-        # =====================================================================
-        theta_all = None
+        # Batched OLS: Use unfold() to create sliding windows
+        theta_all_batch = None
         offset = first_row + ols_window - lookback
         n_windows = 0
 
         if n_residual_rows >= ols_window:
             # Create sliding windows using unfold
-            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_treatments)
-            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)  # (n_windows, ols_window, n_assets)
+            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)
+            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)
             n_windows = T_windows.shape[0]
 
             try:
-                theta_all = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
-                # theta_all shape: (n_windows, n_treatments, n_assets)
+                theta_all_batch = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
 
-                # Batched SE computation (always compute - needed by both models)
-                # Compute (T'T)^{-1} diagonal elements for all windows
-                TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)  # (n_windows, n_treatments, n_treatments)
-                TtT_inv = torch.linalg.inv(TtT)  # (n_windows, n_treatments, n_treatments)
-                TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)  # (n_windows, n_treatments)
+                # Batched SE computation
+                TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)
+                TtT_inv = torch.linalg.inv(TtT)
+                TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)
 
-                # Compute residuals and sigma^2 for each window
-                Y_pred = torch.bmm(T_windows, theta_all)  # (n_windows, ols_window, n_assets)
-                residuals = Y_windows - Y_pred  # (n_windows, ols_window, n_assets)
-                RSS = (residuals ** 2).sum(dim=1)  # (n_windows, n_assets)
-                df = ols_window - n_treatments  # Degrees of freedom
-                sigma_sq = RSS / df  # (n_windows, n_assets)
+                Y_pred = torch.bmm(T_windows, theta_all_batch)
+                residuals = Y_windows - Y_pred
+                RSS = (residuals ** 2).sum(dim=1)
+                df = ols_window - n_treatments
+                sigma_sq = RSS / df
 
-                # SE[i,j,k] = sqrt(TtT_inv_diag[i,j] * sigma_sq[i,k])
                 se_all = torch.sqrt(TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1))
-                # se_all shape: (n_windows, n_treatments, n_assets)
 
-                # Store coefficients and SEs for all valid days at once
+                # Store coefficients and SEs
                 for i in range(n_windows):
                     day_rel_idx = i + offset
                     if 0 <= day_rel_idx < n_total_test_days:
-                        theta_reshaped = theta_all[i].view(p, n_assets, n_assets)
+                        theta_reshaped = theta_all_batch[i].view(p, n_assets, n_assets)
                         coefficients[day_rel_idx, :p, :, :] = theta_reshaped
 
                         se_reshaped = se_all[i].view(p, n_assets, n_assets)
                         standard_errors[day_rel_idx, :p, :, :] = se_reshaped
 
             except RuntimeError:
-                # Singular matrix encountered - this shouldn't happen with proper residualization
-                theta_all = None
+                theta_all_batch = None
 
         # =====================================================================
-        # Forecast generation loop (must stay sequential - model_t.predict dependency)
+        # Forecast generation using pre-computed E[Y|W] and E[T|W]
         # =====================================================================
         for day_rel_idx in range(n_total_test_days):
             day_idx = lookback + day_rel_idx
 
             # Get theta for this day from batched result
             window_idx = day_rel_idx - offset
-            if theta_all is None or window_idx < 0 or window_idx >= n_windows:
-                # No valid theta for this day (early days or batched OLS failed)
+            if theta_all_batch is None or window_idx < 0 or window_idx >= n_windows:
                 continue
 
-            theta = theta_all[window_idx]  # (n_treatments, n_assets)
+            theta = theta_all_batch[window_idx]  # (n_treatments, n_assets)
 
-            # Generate forecast
-            indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-            treatment_pred = Y[indices, :].reshape(1, n_treatments)
-
-            # Build control features for prediction (lagged only)
-            lagged_indices = torch.arange(day_idx - 1, day_idx - p - 1, -1, device=device)
-            controls_pred = W[lagged_indices, :].reshape(1, n_confounders * p)
-
-            # Get the most recent fold for residualizing prediction
-            active_folds = get_active_folds_for_day(day_idx, p, config)
-            last_fold_idx = max(active_folds)
-            last_fold = cache.get_fold(last_fold_idx, p)
-
-            if last_fold is None:
+            # Check if we have forecast predictions for this day
+            if day_idx not in forecast_Y_preds[p] or day_idx not in forecast_T_preds[p]:
                 continue
 
-            # Residualize treatment using the last fold's model
-            controls_pred_np = controls_pred.cpu().numpy()
-            treatment_pred_np = treatment_pred.cpu().numpy()
+            # Get exact E[Y|W] and E[T|W] from Step 2
+            E_Y_given_W = torch.from_numpy(forecast_Y_preds[p][day_idx]).to(device=device, dtype=dtype)
+            E_T_given_W = torch.from_numpy(forecast_T_preds[p][day_idx]).to(device=device, dtype=dtype)
 
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-                T_hat = last_fold.model_t.predict(controls_pred_np)
+            # Build T_actual: actual treatment values [Y_{day-1}, ..., Y_{day-p}]
+            indices = list(range(day_idx - 1, day_idx - p - 1, -1))
+            T_actual = torch.from_numpy(Y_np[indices, :].reshape(1, n_treatments)).to(device=device, dtype=dtype)
 
-            T_pred_residual = treatment_pred_np - T_hat
-            T_pred_residual_torch = torch.from_numpy(T_pred_residual).to(device=device, dtype=dtype)
+            # Compute T_residual = T_actual - E[T|W]
+            T_residual = T_actual - E_T_given_W.reshape(1, n_treatments)
 
-            # Compute causal effect: T_residual * theta
-            causal_effect = torch.mm(T_pred_residual_torch, theta).squeeze(0)
+            # Causal effect: T_residual × θ
+            causal_effect = torch.mm(T_residual, theta).squeeze(0)
 
-            # Add confounder baseline E[Y|W] for full forecast
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-                Y_baseline_np = last_fold.model_y.predict(controls_pred_np)
-            Y_baseline = torch.from_numpy(Y_baseline_np).to(device=device, dtype=dtype).squeeze(0)
-            forecast = Y_baseline + causal_effect
+            # Forecast = E[Y|W] + causal_effect
+            forecast = E_Y_given_W + causal_effect
             forecasts_all[day_rel_idx, :, p - 1] = forecast
 
         if verbose:
             print(f"      p={p}: completed")
 
-    print("    Step 2-3: Complete")
+    print("    Step 3: Complete")
+
+    # Clean up residual storage
+    del R_Y_all, R_T_all, forecast_Y_preds, forecast_T_preds
+    _clear_memory()
 
     # Actuals for ALL test days (no trimming)
     actuals = Y[lookback:, :]  # (n_total_test_days, n_assets)
+
+    total_time = time.time() - t0
+    print(f"  Core DML complete in {total_time:.1f}s")
 
     return forecasts_all, coefficients, standard_errors, actuals
 

@@ -26,15 +26,11 @@ from src.models.dml_pytorch import (
     _fit_orvarx_core,
     estimate_theta,
     compute_se_oracle,
-    fit_orvarx_single_day,
     # Grid-based functions
     compute_fold_boundaries,
     get_active_folds_for_day,
-    ensure_fold_trained,
-    compute_residuals,
     # Vectorized helpers
     get_all_required_folds,
-    precompute_all_residuals,
 )
 
 from src.models.oracle_var import fit_oraclevarx_batched
@@ -53,17 +49,13 @@ __all__ = [
     '_fit_orvarx_core',
     'estimate_theta',
     'compute_se_oracle',
-    'fit_orvarx_single_day',
     # ORACLE-VARX functions
     'fit_oraclevarx_batched',
     # Grid-based functions
     'compute_fold_boundaries',
     'get_active_folds_for_day',
-    'ensure_fold_trained',
-    'compute_residuals',
     # Vectorized helpers
     'get_all_required_folds',
-    'precompute_all_residuals',
     # Configuration
     'GridConfig',
 ]

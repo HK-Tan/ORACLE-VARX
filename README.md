@@ -34,7 +34,6 @@ Main model implementations:
 ### `src/modules/`
 Shared utilities:
 - `grid_config.py` - Lookback configuration
-- `model_cache.py` - Fold-level memoization
 - `batch_utils.py` - Batched OLS and BH correction
 - `factory.py` - Model factory for tree/linear regressors
 
