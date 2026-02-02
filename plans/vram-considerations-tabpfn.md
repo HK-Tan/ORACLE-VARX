@@ -1,161 +1,150 @@
 # VRAM Considerations for Batched TabPFN
 
-## Key Finding: Linear VRAM Scaling
+## Batch Size Heuristic
 
-VRAM usage scales **perfectly linearly** with batch size (R²=1.000 verified empirically). This enables a simple 2-point probe to determine optimal batch size for any GPU.
+After extensive testing, we use a **simple size-based heuristic** rather than runtime VRAM probing. The probing approach proved unreliable due to PyTorch memory caching and the difficulty of capturing TabPFN's full memory footprint (CUDA kernels, cuBLAS workspaces, attention buffers).
 
-**Linear Model:**
+**Formula:**
 ```
-VRAM = fixed_overhead + per_batch_cost × batch_size
+batch_size = (4.5 × VRAM_GB) / p^1.5
 ```
 
 Where:
-- `fixed_overhead`: Base VRAM for TabPFN model and framework (~0.05 GB)
-- `per_batch_cost`: Incremental VRAM per fold in batch (varies with p)
+- `VRAM_GB`: Total GPU memory in GB
+- `p`: Lag order (1 to p_max)
+- `p^1.5`: Super-linear scaling to account for attention memory growth
 
-## VRAM Scaling by Lag Order (p)
+## Why This Formula?
 
-Higher p means more treatment features (n_assets × p), which increases per-batch cost:
+### Linear VRAM Scaling
+Calibrated so that 80GB GPU gets numerator of 360:
+- `4.5 × 80 = 360`
 
-| p | Features (9 assets) | per_batch_cost (GB) | Notes |
-|---|---------------------|---------------------|-------|
-| 1 | 9 treatments | ~0.16 | Smallest batches possible |
-| 3 | 27 treatments | ~0.41 | |
-| 5 | 45 treatments | ~0.65 | |
-| 7 | 63 treatments | ~0.90 | |
-| 10 | 90 treatments | ~1.27 | Largest feature set |
+The 4.5 coefficient was empirically tuned on A100 80GB with ~228 folds.
 
-*Values measured on 8GB GPU with n_estimators=8*
+### Super-linear p Scaling
+Higher p means more treatment features (n_assets × p), which increases memory super-linearly due to:
+1. **Attention matrices**: O(features²) in the attention mechanism
+2. **Intermediate activations**: Scale with feature count
+3. **cuBLAS workspaces**: Grow with matrix dimensions
 
-## Automatic Batch Size Selection
-
-The implementation uses a **2-point VRAM probe** for each p value:
-
-1. Run batch=1, measure peak VRAM → `vram_1`
-2. Run batch=2, measure peak VRAM → `vram_2`
-3. Compute linear model parameters:
-   - `per_batch_cost = vram_2 - vram_1`
-   - `fixed_overhead = vram_1 - per_batch_cost`
-4. Extrapolate optimal batch size:
-   - `optimal_batch = (target_vram - fixed_overhead) / per_batch_cost`
-
-**Default target: 75% of total VRAM** (leaves headroom for system stability)
+The `p^1.5` exponent provides extra safety margin for larger p values.
 
 ## Expected Batch Sizes by GPU
 
 ### 8GB GPU (e.g., RTX 3070)
-Target = 0.75 × 8 = 6 GB
+Numerator = 4.5 × 8 = 36
 
-| p | Optimal batch |
-|---|---------------|
+| p | Batch Size |
+|---|------------|
 | 1 | 36 |
-| 3 | 14 |
+| 2 | 12 |
+| 3 | 6 |
+| 5 | 3 |
+| 10 | 1 |
+
+### 24GB GPU (e.g., RTX 4090)
+Numerator = 4.5 × 24 = 108
+
+| p | Batch Size |
+|---|------------|
+| 1 | 108 |
+| 2 | 38 |
+| 3 | 20 |
 | 5 | 9 |
-| 7 | 6 |
-| 10 | 4 |
+| 10 | 3 |
 
-### 24GB GPU (e.g., RTX 4090, A100 40GB)
-Target = 0.75 × 24 = 18 GB
+### 48GB GPU (e.g., A40, RTX 6000 Ada)
+Numerator = 4.5 × 48 = 216
 
-| p | Optimal batch |
-|---|---------------|
-| 1 | 110 |
-| 3 | 43 |
-| 5 | 27 |
-| 7 | 20 |
-| 10 | 14 |
+| p | Batch Size |
+|---|------------|
+| 1 | 216 |
+| 2 | 76 |
+| 3 | 41 |
+| 5 | 19 |
+| 10 | 6 |
 
 ### 80GB GPU (e.g., A100 80GB, H100)
-Target = 0.75 × 80 = 60 GB
+Numerator = 4.5 × 80 = 360
 
-| p | Optimal batch |
-|---|---------------|
-| 1 | 370 |
-| 3 | 145 |
-| 5 | 92 |
-| 7 | 66 |
-| 10 | 47 |
+| p | Batch Size |
+|---|------------|
+| 1 | 360 |
+| 2 | 127 |
+| 3 | 69 |
+| 5 | 32 |
+| 10 | 11 |
 
-## Why Linear Scaling?
+## Implementation
 
-TabPFN processes batches as `(seq_len, batch_size, features)` tensors. The dominant memory consumers are:
-
-1. **Attention matrices**: O(seq_len² × batch_size) - linear in batch
-2. **Intermediate activations**: O(seq_len × batch_size × hidden_dim) - linear in batch
-3. **Model weights**: O(1) - constant (shared across batch)
-
-Since model weights are constant and all other terms scale linearly with batch_size, total VRAM scales linearly.
-
-## Implementation Details
-
-### Probe Function
 ```python
-def _probe_vram_for_batch_size(
-    tabpfn: BatchedFoldTabPFN,
-    X_trains: List[np.ndarray],
-    Y_trains: List[np.ndarray],
-    X_tests: List[np.ndarray],
-    target_vram_pct: float = 0.75,
-) -> int:
+def _get_batch_size_for_p(p: int, n_folds: int, verbose: bool = False) -> int:
+    """Get batch size for a given lag order p using size-based heuristic."""
+    _, total_vram_gb, _ = _get_vram_usage()
+
+    # Scale factor: 4.5 * VRAM (calibrated: 360 for 80GB)
+    numerator = 4.5 * total_vram_gb
+
+    batch_size = int(numerator / (p ** 1.5))
+    batch_size = min(batch_size, n_folds)
+    batch_size = max(1, batch_size)
+
+    return batch_size
 ```
 
-### Measurement Method
-- Uses `torch.cuda.max_memory_allocated()` for accurate peak measurement
-- Calls `torch.cuda.empty_cache()` and `reset_peak_memory_stats()` before each probe
-- Runs actual TabPFN inference (not estimates) for accurate measurement
+## Why Not VRAM Probing?
 
-### Edge Cases Handled
-- `len(X_trains) < 2`: Returns 1 (can't probe)
-- `per_batch_cost <= 0`: Returns all folds (no scaling detected)
-- No CUDA: Returns all folds (CPU has different constraints)
-- Result capped at available folds and minimum of 1
+We tried several probing approaches that all failed:
 
-## Tuning the Target VRAM
+### 1. `max_memory_allocated()` Approach
+Only tracks PyTorch tensor allocations, missing:
+- CUDA kernel memory
+- cuBLAS workspaces
+- Flash attention buffers
+- Other non-PyTorch allocations
 
-The `target_vram_pct` parameter (default 0.75) can be adjusted:
+Result: Reported ~0.1 GB when actual usage was ~20 GB.
 
-| Setting | Use Case |
-|---------|----------|
-| 0.60 | Conservative; running other GPU processes |
-| 0.75 | Default; good balance of speed and stability |
-| 0.85 | Aggressive; maximizes batch size |
-| 0.90+ | Not recommended; risk of OOM |
+### 2. `mem_get_info()` Before/After Approach
+Measures driver-level memory but suffers from:
+- PyTorch memory caching causing inconsistent baselines
+- Memory reuse patterns between batch=1 and batch=2
+- Could show batch=2 using LESS memory than batch=1
 
-## Comparison to Previous Heuristic
+Result: Negative per_batch costs, triggering fallback.
 
-**Old approach** (heuristic):
-```python
-base = 32 * (total_gb / 8)  # Linear scaling from 8GB baseline
-batch_size = base // p      # Inverse scaling with p
-```
-
-Problems:
-- Assumed fixed relationship between GPU size and optimal batch
-- Didn't account for actual VRAM usage patterns
-- Could under- or over-estimate significantly
-
-**New approach** (2-point probe):
-- Measures actual VRAM on the specific hardware
-- Accounts for TabPFN version, CUDA version, driver differences
-- Adapts to actual data shapes (train_size, test_size, n_features)
-- Self-calibrating for any GPU size
+### 3. Memory Increase Measurement with Warmup
+Better in theory, but still inconsistent due to:
+- `empty_cache()` not fully resetting state
+- Model weight loading affecting first measurement
+- Fragmentation effects
 
 ## Verification
 
-Run with `--verbose` to see probed batch sizes:
+Run with `--verbose` to see batch sizes:
 ```bash
 python scripts/run_oraclevarx_tabpfn_experiment.py --n-days 1500 --verbose
 ```
 
-Expected output:
+Expected output on 80GB GPU:
 ```
   Phase 3: Running batched TabPFN predictions...
-    p=1: 23 folds, probed batch_size=23...
-    p=2: 23 folds, probed batch_size=18...
+    p=1: batch_size = 360/1^1.5 = 360 → capped to 228
+    p=2: batch_size = 360/2^1.5 = 127 → capped to 127
+    p=3: batch_size = 360/3^1.5 = 69 → capped to 69
     ...
-    p=7: 23 folds, probed batch_size=6...
-    p=7: completed in 45.2s, VRAM: 5.8/8.0 GB (72%)
-    ...
+    p=10: batch_size = 360/10^1.5 = 11 → capped to 11
 ```
 
-VRAM should stay around the target (75%) across all p values.
+## Tuning
+
+If you experience OOM errors, reduce the coefficient:
+```python
+numerator = 3.5 * total_vram_gb  # More conservative
+```
+
+If you want to be more aggressive:
+```python
+numerator = 5.5 * total_vram_gb  # Use more VRAM
+```
