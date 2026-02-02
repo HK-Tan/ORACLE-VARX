@@ -45,6 +45,7 @@ Algorithm (fit_oraclevarx_batched):
     - n_output_days = n_total_test_days - validation_days (CLEAN formula)
 """
 
+import gc
 import torch
 import numpy as np
 from scipy import stats
@@ -221,6 +222,9 @@ def fit_oraclevarx_batched(
     # (n_assets, n_total_test_days, p_max)
     forecasts_all_batched = forecasts_all_batched_raw.transpose(0, 1)
 
+    # Memory cleanup after Phase 1
+    gc.collect()
+
     print(f"  Phase 1: Complete. Got θ and SE for {n_total_test_days} days and {p_max} lags.")
 
     # =========================================================================
@@ -292,6 +296,9 @@ def fit_oraclevarx_batched(
                   f"min={p_stats.min()}, max={p_stats.max()}, "
                   f"median={int(np.median(p_stats))}")
 
+    # Memory cleanup after Phase 2
+    gc.collect()
+
     print("  Phase 2: Complete.")
 
     # =========================================================================
@@ -361,6 +368,9 @@ def fit_oraclevarx_batched(
         p_idx = (p_alpha_output[:, alpha_idx] - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
         forecasts_all[:, :, alpha_idx] = torch.gather(forecasts_sliced, dim=2, index=p_idx).squeeze(-1)
 
+    # Memory cleanup after forecasts_all construction
+    gc.collect()
+
     # =========================================================================
     # Construct coefficients_all for ORACLEVARXResult
     # =========================================================================
@@ -377,6 +387,10 @@ def fit_oraclevarx_batched(
             p_selected = p_alpha_all[day_idx_full, alpha_idx].item()
             # Copy coefficients for lags [0, ..., p_selected-1] (0-indexed)
             coefficients_all[d, alpha_idx, :p_selected, :, :] = theta_all[day_idx_full, :p_selected, :, :]
+
+    # Memory cleanup after coefficients_all construction
+    del theta_all
+    gc.collect()
 
     # Prepare arrays for result
     # p_alpha_all needs trimming: (n_total_test_days, n_alphas) -> (n_output_days, n_alphas)
