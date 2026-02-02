@@ -247,10 +247,11 @@ class BatchedFoldTabPFN:
             warnings.filterwarnings('ignore', category=UserWarning)
             regressor.fit(X_dummy, y_dummy)
 
-        # Store the single raw transformer and decoder
-        # We'll run the forward pass once and rely on TabPFN's internal ensemble
-        self._models.append(regressor.models_[0])
-        self._bardists.append(regressor.znorm_space_bardist_)
+        # Store ALL raw transformers for true ensemble
+        # TabPFN creates n_estimators models with different preprocessing
+        for model in regressor.models_:
+            self._models.append(model)
+            self._bardists.append(regressor.znorm_space_bardist_)
         self._regressor = regressor  # Keep reference for ensemble config
 
     def fit_predict_batch(

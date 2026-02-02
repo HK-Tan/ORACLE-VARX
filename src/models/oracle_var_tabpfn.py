@@ -101,51 +101,101 @@ def _get_vram_usage() -> Tuple[float, float, float]:
     return (used, total, percent)
 
 
+def _measure_peak_vram_during_inference(
+    tabpfn: 'BatchedFoldTabPFN',
+    X_trains: List[np.ndarray],
+    Y_trains: List[np.ndarray],
+    X_tests: List[np.ndarray],
+    poll_interval: float = 0.005,
+) -> float:
+    """Run inference while monitoring peak VRAM in a background thread.
+
+    Args:
+        tabpfn: BatchedFoldTabPFN instance
+        X_trains: Training feature arrays
+        Y_trains: Training target arrays
+        X_tests: Test feature arrays
+        poll_interval: How often to poll VRAM (seconds, default 5ms)
+
+    Returns:
+        Peak VRAM usage in GB during inference
+    """
+    import threading
+
+    peak_vram = [0.0]  # Use list to allow mutation from thread
+    stop_event = threading.Event()
+
+    def monitor():
+        while not stop_event.is_set():
+            used, _, _ = _get_vram_usage()
+            peak_vram[0] = max(peak_vram[0], used)
+            time.sleep(poll_interval)
+
+    # Start monitor thread
+    thread = threading.Thread(target=monitor, daemon=True)
+    thread.start()
+
+    # Run inference (this is where VRAM spikes)
+    _ = tabpfn.fit_predict_batch(X_trains, Y_trains, X_tests, batch_size=len(X_trains))
+
+    # Stop monitor and get peak
+    stop_event.set()
+    thread.join(timeout=1.0)
+
+    return peak_vram[0]
+
+
 def _probe_vram_for_batch_size(
     tabpfn: 'BatchedFoldTabPFN',
     X_trains: List[np.ndarray],
     Y_trains: List[np.ndarray],
     X_tests: List[np.ndarray],
-    target_vram_pct: float = 0.75,
+    n_folds: int,
+    target_vram_pct: float = 0.70,
+    verbose: bool = False,
 ) -> int:
     """Probe VRAM usage and extrapolate optimal batch size.
 
     Uses 2-point linear probe (batch=1, batch=2) to fit:
         VRAM = fixed_overhead + per_batch_cost × batch_size
 
-    Then extrapolates to find max batch_size that stays under target_vram_pct.
+    Monitors PEAK VRAM during inference using a background thread, which
+    captures actual GPU memory including model weights, CUDA context, and
+    inference tensors (not just PyTorch allocations).
 
     Args:
         tabpfn: BatchedFoldTabPFN instance
-        X_trains: List of training feature arrays (need at least 2)
+        X_trains: List of training feature arrays (need at least 2 for probing)
         Y_trains: List of training target arrays
         X_tests: List of test feature arrays
-        target_vram_pct: Target VRAM usage as fraction (default 0.75 = 75%)
+        n_folds: Total number of folds available (for capping)
+        target_vram_pct: Target VRAM usage as fraction (default 0.70 = 70%)
+        verbose: Print VRAM probe details
 
     Returns:
-        Optimal batch size (minimum 1)
+        Optimal batch size (minimum 1, capped at n_folds).
     """
     if len(X_trains) < 2:
         return 1  # Not enough data for probe
 
     if not torch.cuda.is_available():
-        return len(X_trains)  # No GPU, use all
+        return n_folds  # No GPU, use all
 
     # Get total VRAM
-    total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    _, total_vram_gb, _ = _get_vram_usage()
     target_vram_gb = target_vram_pct * total_vram_gb
 
-    # Measure VRAM for batch=1
+    # Measure PEAK VRAM during batch=1 inference using background thread
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    _ = tabpfn.fit_predict_batch(X_trains[:1], Y_trains[:1], X_tests[:1], batch_size=1)
-    vram_1 = torch.cuda.max_memory_allocated() / (1024 ** 3)
+    vram_1 = _measure_peak_vram_during_inference(
+        tabpfn, X_trains[:1], Y_trains[:1], X_tests[:1]
+    )
 
-    # Measure VRAM for batch=2
+    # Measure PEAK VRAM during batch=2 inference
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    _ = tabpfn.fit_predict_batch(X_trains[:2], Y_trains[:2], X_tests[:2], batch_size=2)
-    vram_2 = torch.cuda.max_memory_allocated() / (1024 ** 3)
+    vram_2 = _measure_peak_vram_during_inference(
+        tabpfn, X_trains[:2], Y_trains[:2], X_tests[:2]
+    )
 
     torch.cuda.empty_cache()
 
@@ -153,14 +203,24 @@ def _probe_vram_for_batch_size(
     per_batch_cost = vram_2 - vram_1
     fixed_overhead = vram_1 - per_batch_cost
 
+    if verbose:
+        print(f"      VRAM probe: batch=1 → {vram_1:.2f} GB, batch=2 → {vram_2:.2f} GB")
+        print(f"      Linear model: fixed={fixed_overhead:.2f} GB, per_batch={per_batch_cost:.2f} GB")
+        print(f"      Target: {target_vram_gb:.1f} GB ({target_vram_pct*100:.0f}% of {total_vram_gb:.1f} GB)")
+
     # Extrapolate optimal batch size
     if per_batch_cost <= 0:
-        return len(X_trains)  # No scaling detected, use all
+        if verbose:
+            print(f"      No VRAM scaling detected, using all {n_folds} folds")
+        return n_folds  # No scaling detected, use all
 
     optimal_batch = int((target_vram_gb - fixed_overhead) / per_batch_cost)
 
+    if verbose:
+        print(f"      Extrapolated optimal_batch = ({target_vram_gb:.1f} - {fixed_overhead:.2f}) / {per_batch_cost:.2f} = {optimal_batch}")
+
     # Cap at number of folds available
-    optimal_batch = min(optimal_batch, len(X_trains))
+    optimal_batch = min(optimal_batch, n_folds)
 
     return max(1, optimal_batch)
 
@@ -366,7 +426,7 @@ def fit_oraclevarx_tabpfn(
     n_estimators: int = 8,
     device: str = 'cuda',
     verbose: bool = False,
-    target_vram_pct: float = 0.75,
+    target_vram_pct: float = 0.70,
 ) -> ORACLEVARXResult:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
 
@@ -390,7 +450,7 @@ def fit_oraclevarx_tabpfn(
         n_estimators: Number of TabPFN ensemble members (default: 8)
         device: Device for TabPFN ('cuda' or 'cpu')
         verbose: Print detailed progress
-        target_vram_pct: Target VRAM usage (default 0.75 = 75%). Batch size is
+        target_vram_pct: Target VRAM usage (default 0.70 = 70%). Batch size is
             automatically determined per p using a 2-point VRAM probe.
 
     Returns:
@@ -576,13 +636,12 @@ def fit_oraclevarx_tabpfn(
         sample_Y_trains = [fd['Y_train'] for fd in folds_p[:2]]
         sample_X_tests = [fd['X_test'] for fd in folds_p[:2]]
 
-        optimal_batch = _probe_vram_for_batch_size(
+        effective_batch_size = _probe_vram_for_batch_size(
             tabpfn, sample_X_trains, sample_Y_trains, sample_X_tests,
+            n_folds=n_folds_p,
             target_vram_pct=target_vram_pct,
+            verbose=verbose,
         )
-
-        # Cap at number of folds
-        effective_batch_size = min(n_folds_p, optimal_batch)
 
         if verbose:
             print(f"    p={p}: {n_folds_p} folds, probed batch_size={effective_batch_size}...")
