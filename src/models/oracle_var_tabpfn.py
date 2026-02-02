@@ -121,9 +121,9 @@ def _get_batch_size_for_p(p: int, n_folds: int, verbose: bool = False) -> int:
     # Get available VRAM
     _, total_vram_gb, _ = _get_vram_usage()
 
-    # Scale factor: 36 * (VRAM / 8) = 4.5 * VRAM
-    # Calibrated for 80GB → 360 numerator
-    numerator = 4.5 * total_vram_gb
+    # Scale factor: 48 * (VRAM / 8) = 6 * VRAM
+    # Calibrated for 80GB → 480 numerator
+    numerator = 6 * total_vram_gb
 
     batch_size = int(numerator / (p ** 1.5))
     batch_size = min(batch_size, n_folds)
@@ -648,6 +648,18 @@ def fit_oraclevarx_tabpfn(
         vram_thread.join(timeout=1.0)
 
     print(f"  Phase 3: Complete ({time.time() - t0:.1f}s)")
+
+    # =========================================================================
+    # GPU Memory Cleanup before Phase 4
+    # =========================================================================
+    # Clear GPU memory after TabPFN to avoid fragmentation issues with MAGMA
+    # (MAGMA's batched operations need contiguous memory blocks)
+    del tabpfn
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    if verbose:
+        used, total, _ = _get_vram_usage()
+        print(f"  GPU memory cleared: {used:.1f}/{total:.1f} GB")
 
     # =========================================================================
     # Phase 4: Batched OLS for all days and all lags
