@@ -37,12 +37,10 @@ Architecture:
 
 import gc
 import time
-import warnings
 from typing import List, Optional, Tuple, Dict, Any
 
 import torch
 import numpy as np
-from scipy import stats
 
 
 def _clear_gpu_memory():
@@ -101,128 +99,40 @@ def _get_vram_usage() -> Tuple[float, float, float]:
     return (used, total, percent)
 
 
-def _measure_peak_vram_during_inference(
-    tabpfn: 'BatchedFoldTabPFN',
-    X_trains: List[np.ndarray],
-    Y_trains: List[np.ndarray],
-    X_tests: List[np.ndarray],
-    poll_interval: float = 0.005,
-) -> float:
-    """Run inference while monitoring peak VRAM in a background thread.
+def _get_batch_size_for_p(p: int, n_folds: int, verbose: bool = False) -> int:
+    """Get batch size for a given lag order p using size-based heuristic.
+
+    Uses formula: batch_size = (4.5 * VRAM_GB) / p^1.5
+
+    This accounts for:
+    - Larger p means more features (n_assets * p treatment features)
+    - Memory scales super-linearly with feature count due to attention
+    - The p^1.5 exponent provides extra margin for larger p values
+    - Scales linearly with available VRAM (calibrated: 360 for 80GB)
 
     Args:
-        tabpfn: BatchedFoldTabPFN instance
-        X_trains: Training feature arrays
-        Y_trains: Training target arrays
-        X_tests: Test feature arrays
-        poll_interval: How often to poll VRAM (seconds, default 5ms)
-
-    Returns:
-        Peak VRAM usage in GB during inference
-    """
-    import threading
-
-    peak_vram = [0.0]  # Use list to allow mutation from thread
-    stop_event = threading.Event()
-
-    def monitor():
-        while not stop_event.is_set():
-            used, _, _ = _get_vram_usage()
-            peak_vram[0] = max(peak_vram[0], used)
-            time.sleep(poll_interval)
-
-    # Start monitor thread
-    thread = threading.Thread(target=monitor, daemon=True)
-    thread.start()
-
-    # Run inference (this is where VRAM spikes)
-    _ = tabpfn.fit_predict_batch(X_trains, Y_trains, X_tests, batch_size=len(X_trains))
-
-    # Stop monitor and get peak
-    stop_event.set()
-    thread.join(timeout=1.0)
-
-    return peak_vram[0]
-
-
-def _probe_vram_for_batch_size(
-    tabpfn: 'BatchedFoldTabPFN',
-    X_trains: List[np.ndarray],
-    Y_trains: List[np.ndarray],
-    X_tests: List[np.ndarray],
-    n_folds: int,
-    target_vram_pct: float = 0.70,
-    verbose: bool = False,
-) -> int:
-    """Probe VRAM usage and extrapolate optimal batch size.
-
-    Uses 2-point linear probe (batch=1, batch=2) to fit:
-        VRAM = fixed_overhead + per_batch_cost × batch_size
-
-    Monitors PEAK VRAM during inference using a background thread, which
-    captures actual GPU memory including model weights, CUDA context, and
-    inference tensors (not just PyTorch allocations).
-
-    Args:
-        tabpfn: BatchedFoldTabPFN instance
-        X_trains: List of training feature arrays (need at least 2 for probing)
-        Y_trains: List of training target arrays
-        X_tests: List of test feature arrays
+        p: Lag order (1 to p_max)
         n_folds: Total number of folds available (for capping)
-        target_vram_pct: Target VRAM usage as fraction (default 0.70 = 70%)
-        verbose: Print VRAM probe details
+        verbose: Print batch size calculation
 
     Returns:
-        Optimal batch size (minimum 1, capped at n_folds).
+        Batch size (minimum 1, capped at n_folds).
     """
-    if len(X_trains) < 2:
-        return 1  # Not enough data for probe
-
-    if not torch.cuda.is_available():
-        return n_folds  # No GPU, use all
-
-    # Get total VRAM
+    # Get available VRAM
     _, total_vram_gb, _ = _get_vram_usage()
-    target_vram_gb = target_vram_pct * total_vram_gb
 
-    # Measure PEAK VRAM during batch=1 inference using background thread
-    torch.cuda.empty_cache()
-    vram_1 = _measure_peak_vram_during_inference(
-        tabpfn, X_trains[:1], Y_trains[:1], X_tests[:1]
-    )
+    # Scale factor: 36 * (VRAM / 8) = 4.5 * VRAM
+    # Calibrated for 80GB → 360 numerator
+    numerator = 4.5 * total_vram_gb
 
-    # Measure PEAK VRAM during batch=2 inference
-    torch.cuda.empty_cache()
-    vram_2 = _measure_peak_vram_during_inference(
-        tabpfn, X_trains[:2], Y_trains[:2], X_tests[:2]
-    )
-
-    torch.cuda.empty_cache()
-
-    # Linear model: VRAM = fixed + per_batch × batch
-    per_batch_cost = vram_2 - vram_1
-    fixed_overhead = vram_1 - per_batch_cost
+    batch_size = int(numerator / (p ** 1.5))
+    batch_size = min(batch_size, n_folds)
+    batch_size = max(1, batch_size)
 
     if verbose:
-        print(f"      VRAM probe: batch=1 → {vram_1:.2f} GB, batch=2 → {vram_2:.2f} GB")
-        print(f"      Linear model: fixed={fixed_overhead:.2f} GB, per_batch={per_batch_cost:.2f} GB")
-        print(f"      Target: {target_vram_gb:.1f} GB ({target_vram_pct*100:.0f}% of {total_vram_gb:.1f} GB)")
+        print(f"    p={p}: batch_size = {numerator:.0f}/{p}^1.5 = {int(numerator / (p ** 1.5))} → capped to {batch_size}")
 
-    # Extrapolate optimal batch size
-    if per_batch_cost <= 0:
-        if verbose:
-            print(f"      No VRAM scaling detected, using all {n_folds} folds")
-        return n_folds  # No scaling detected, use all
-
-    optimal_batch = int((target_vram_gb - fixed_overhead) / per_batch_cost)
-
-    if verbose:
-        print(f"      Extrapolated optimal_batch = ({target_vram_gb:.1f} - {fixed_overhead:.2f}) / {per_batch_cost:.2f} = {optimal_batch}")
-
-    # Cap at number of folds available
-    optimal_batch = min(optimal_batch, n_folds)
-
-    return max(1, optimal_batch)
+    return batch_size
 
 from src.results import ORACLEVARXResult
 from src.modules.grid_config import GridConfig
@@ -631,20 +541,8 @@ def fit_oraclevarx_tabpfn(
 
         p_start_time = time.time()
 
-        # Probe optimal batch size for this p using 2-point linear extrapolation
-        sample_X_trains = [fd['X_train'] for fd in folds_p[:2]]
-        sample_Y_trains = [fd['Y_train'] for fd in folds_p[:2]]
-        sample_X_tests = [fd['X_test'] for fd in folds_p[:2]]
-
-        effective_batch_size = _probe_vram_for_batch_size(
-            tabpfn, sample_X_trains, sample_Y_trains, sample_X_tests,
-            n_folds=n_folds_p,
-            target_vram_pct=target_vram_pct,
-            verbose=verbose,
-        )
-
-        if verbose:
-            print(f"    p={p}: {n_folds_p} folds, probed batch_size={effective_batch_size}...")
+        # Get batch size using size-based heuristic (360/p^1.5)
+        effective_batch_size = _get_batch_size_for_p(p, n_folds_p, verbose=verbose)
 
         # Group folds by test size (batching requires same size)
         folds_by_test_size: Dict[int, List[int]] = {}
@@ -906,7 +804,7 @@ def fit_oraclevarx_tabpfn(
 
     # Rolling alpha selection
     forecasts_all_transposed = forecasts_all.transpose(0, 1)
-    alpha_optimal, alpha_counts, _, p_optimal_all_days = rolling_alpha_selection(
+    alpha_optimal, _alpha_counts, _, p_optimal_all_days = rolling_alpha_selection(
         forecasts_all_batched=forecasts_all_transposed,
         p_alpha_all=p_alpha_all,
         actuals=actuals,
