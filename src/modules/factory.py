@@ -1,12 +1,14 @@
-"""CPU-only learner factory for DML first-stage estimation.
+"""Learner factory for DML first-stage estimation.
 
 Supports tree-based learners with native parallelization:
 - xgboost: XGBoost with histogram-based tree method
 - lgbm: LightGBM
 - rf: sklearn RandomForestRegressor
 - extra_trees: sklearn ExtraTreesRegressor
+- tabpfn: TabPFN transformer-based regressor (GPU required)
 
-All learners use n_jobs for CPU parallelization.
+Tree-based learners use n_jobs for CPU parallelization.
+TabPFN requires GPU and a HuggingFace token (HF_TOKEN environment variable).
 """
 import os
 import xgboost as xgb
@@ -39,11 +41,12 @@ def resolve_n_jobs(n_jobs: int) -> int:
 
 
 def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
-    """CPU-only learners with native parallelization.
+    """Get a regressor for first-stage estimation.
 
     Args:
-        name: Regressor name. Options: 'xgboost', 'lgbm', 'rf', 'extra_trees'.
-        n_jobs: Number of parallel jobs (-1 for all cores minus 1, to avoid LightGBM issues)
+        name: Regressor name. Options: 'xgboost', 'lgbm', 'rf', 'extra_trees', 'tabpfn'.
+        n_jobs: Number of parallel jobs (-1 for all cores minus 1, to avoid LightGBM issues).
+                Ignored for TabPFN which uses GPU.
         **kwargs: Additional arguments passed to the regressor
 
     Returns:
@@ -51,6 +54,8 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
 
     Raises:
         ValueError: If unknown regressor name
+        RuntimeError: If TabPFN requested but CUDA is not available
+        ImportError: If TabPFN not installed
     """
     n_jobs = resolve_n_jobs(n_jobs)
 
@@ -80,10 +85,38 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
         from sklearn.ensemble import ExtraTreesRegressor
         return ExtraTreesRegressor(n_jobs=n_jobs, max_depth=5, **kwargs)
 
+    elif name == 'tabpfn':
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "TabPFN requires GPU but CUDA is not available. "
+                "Please run on a machine with GPU support."
+            )
+        # Disable posthog telemetry (~200ms latency per fit() call)
+        os.environ['TABPFN_NO_TELEMETRY'] = '1'
+        os.environ['DO_NOT_TRACK'] = '1'
+        import sys as _sys
+        if 'posthog' not in _sys.modules:
+            class _FakePosthog:
+                def __getattr__(self, name):
+                    return lambda *args, **kwargs: None
+            _sys.modules['posthog'] = _FakePosthog()
+        try:
+            from tabpfn import TabPFNRegressor
+        except ImportError:
+            raise ImportError(
+                "TabPFN not installed. Install with: pip install tabpfn\n"
+                "Also ensure HF_TOKEN environment variable is set and you have "
+                "accepted the TabPFN terms at https://huggingface.co/Prior-Labs/TabPFN"
+            )
+        # n_estimators=1 reduces CPU preprocessing overhead by ~2.5x
+        # (default is 8, but preprocessing is CPU-bound and dominates runtime)
+        return TabPFNRegressor(device='cuda', random_state=42, **kwargs)
+
     else:
         raise ValueError(
             f"Unknown regressor: {name}. "
-            f"Available: xgboost, lgbm, rf, extra_trees"
+            f"Available: xgboost, lgbm, rf, extra_trees, tabpfn"
         )
 
 
