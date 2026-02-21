@@ -48,6 +48,8 @@ from src.evaluation import (
     plot_strategy_comparison,
     plot_lag_analysis,
 )
+from src.models.coefficient_refit import refit_dml_coefficients_for_day, get_target_days
+from src.evaluation.plotting import plot_coefficient_evolution_per_p
 from src.evaluation.backtest import save_experiment_results
 from src.evaluation.plotting import print_performance_summary
 
@@ -277,6 +279,27 @@ def main(
         show_plot=show_plots,
     )
     print(f"  Saved: {strategy_plot_raw_path}")
+
+    # Plot 4+: Per-p coefficient evolution for target days (DML refit)
+    targets = get_target_days(result)
+    for label, result_day_idx in targets:
+        abs_day_idx = lookback + validation_days + result_day_idx
+        p_star = int(result.p_optimal[result_day_idx].item())
+        date_str = result.dates[result_day_idx]
+
+        per_p_coefs = refit_dml_coefficients_for_day(
+            Y=Y_etf, W=W, day_idx=abs_day_idx, p_star=p_star,
+            lookback=lookback, asset_names=etf_tickers, date=date_str,
+            config=config, learner_name=learner_name, n_jobs=n_jobs,
+        )
+
+        save_path = experiment_dir / f"coefficient_evolution_{label}.png"
+        plot_coefficient_evolution_per_p(
+            per_p_coefs,
+            title=f"ORACLE-VARX ({learner_name}): Coefficient Evolution p*={p_star} ({date_str})",
+            save_path=str(save_path), show_plot=show_plots,
+        )
+        print(f"  Saved: {save_path}")
 
     # =========================================================================
     # Step 5: Save Results

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional
+import numpy as np
 import torch
 import pandas as pd
 
@@ -78,6 +79,39 @@ class VARXResult:
             columns=self.asset_names
         )
 
+    def get_coefficient_heatmap_matrix(
+        self, day_idx: Optional[int] = None, max_lag: Optional[int] = None
+    ) -> pd.DataFrame:
+        """Extract coefficient heatmap matrix with lags concatenated along columns.
+
+        Args:
+            day_idx: Index of the forecast day. Required - averaging across days
+                is not statistically meaningful.
+            max_lag: Number of lags to include. If None and day_idx is given,
+                uses p_optimal for that day.
+
+        Returns:
+            DataFrame with shape (n_assets, max_lag * n_assets).
+            Index: asset_names. Columns: ["XLY(L1)", ..., "XLU(L1)", "XLY(L2)", ...].
+        """
+        if day_idx is None:
+            raise ValueError("day_idx is required - averaging across days is not statistically meaningful")
+
+        if max_lag is None:
+            max_lag = int(self.p_optimal[day_idx].item())
+        max_lag = min(max_lag, self.p_max)
+
+        # coefficients shape: (n_days, p_max, n_assets, n_assets)
+        coefs = self.coefficients[day_idx].cpu().numpy()  # (p_max, n_assets, n_assets)
+
+        # Concatenate lags along columns: (n_assets, max_lag * n_assets)
+        heatmap = np.concatenate([coefs[k] for k in range(max_lag)], axis=1)
+
+        # Build column labels
+        columns = [f"{name}(L{k+1})" for k in range(max_lag) for name in self.asset_names]
+
+        return pd.DataFrame(heatmap, index=self.asset_names, columns=columns)
+
     def save(self, path: str) -> None:
         """Save results to disk using torch.save.
 
@@ -139,7 +173,6 @@ class ORACLEVARXResult:
         alpha_optimal: Optimal alpha for each day, shape (n_days,)
         p_optimal: Optimal lag order for each day (at optimal alpha), shape (n_days,)
         alpha_grid: List of alpha values considered
-        coefficients_all: Coefficients for all alphas, shape (n_days, n_alphas, p_max, n_assets, n_assets)
         asset_names: List of asset names
         confounder_names: List of confounder names (always non-empty for ORACLE)
         dates: List of date strings for each forecast day
@@ -151,7 +184,6 @@ class ORACLEVARXResult:
     alpha_optimal: torch.Tensor
     p_optimal: torch.Tensor
     alpha_grid: List[float]
-    coefficients_all: torch.Tensor
     asset_names: List[str]
     confounder_names: List[str]
     dates: List[str]
@@ -167,30 +199,6 @@ class ORACLEVARXResult:
         """Returns number of alpha values in grid."""
         return len(self.alpha_grid)
 
-    @property
-    def coefficients(self) -> torch.Tensor:
-        """Returns coefficients indexed by optimal alpha for each day.
-
-        Returns:
-            Tensor with shape (n_days, p_max, n_assets, n_assets)
-        """
-        # For each day, select the coefficients corresponding to the optimal alpha
-        n_days = self.coefficients_all.shape[0]
-        p_max = self.coefficients_all.shape[2]
-        n_assets = self.coefficients_all.shape[3]
-
-        # Initialize output tensor
-        result = torch.zeros(n_days, p_max, n_assets, n_assets,
-                           device=self.coefficients_all.device,
-                           dtype=self.coefficients_all.dtype)
-
-        # For each day, extract coefficients at optimal alpha
-        for day_idx in range(n_days):
-            alpha_idx = self.alpha_optimal[day_idx].long().item()
-            result[day_idx] = self.coefficients_all[day_idx, alpha_idx]
-
-        return result
-
     def to_dataframe(self) -> pd.DataFrame:
         """Convert forecasts to DataFrame with dates as index and assets as columns.
 
@@ -200,42 +208,6 @@ class ORACLEVARXResult:
         return pd.DataFrame(
             self.forecasts.cpu().numpy().T,  # Transpose to (n_days, n_assets)
             index=self.dates,
-            columns=self.asset_names
-        )
-
-    def get_leadlag_matrix(self, day_idx: int, lag: int, alpha_idx: Optional[int] = None) -> pd.DataFrame:
-        """Extract lead-lag coefficient matrix for a specific day, lag, and alpha.
-
-        Args:
-            day_idx: Index of the forecast day
-            lag: Lag order (1-indexed)
-            alpha_idx: Index into alpha_grid (default: None, uses optimal alpha for the day)
-
-        Returns:
-            DataFrame with shape (n_assets, n_assets) where entry [i, j] represents
-            the effect of asset j at the given lag on asset i
-        """
-        p_max = self.coefficients_all.shape[2]
-
-        if not 1 <= lag <= p_max:
-            raise ValueError(f"Lag must be in range [1, {p_max}], got {lag}")
-        if not 0 <= day_idx < len(self.dates):
-            raise ValueError(f"Day index must be in range [0, {len(self.dates)}), got {day_idx}")
-
-        # Use optimal alpha if not specified
-        if alpha_idx is None:
-            alpha_idx = self.alpha_optimal[day_idx].long().item()
-        else:
-            if not 0 <= alpha_idx < self.n_alphas:
-                raise ValueError(f"Alpha index must be in range [0, {self.n_alphas}), got {alpha_idx}")
-
-        # coefficients_all shape: (n_days, n_alphas, p_max, n_assets, n_assets)
-        # lag is 1-indexed, so we use lag-1 for 0-indexed access
-        coef_matrix = self.coefficients_all[day_idx, alpha_idx, lag - 1].cpu().numpy()
-
-        return pd.DataFrame(
-            coef_matrix,
-            index=self.asset_names,
             columns=self.asset_names
         )
 
@@ -252,7 +224,6 @@ class ORACLEVARXResult:
             'alpha_optimal': self.alpha_optimal,
             'p_optimal': self.p_optimal,
             'alpha_grid': self.alpha_grid,
-            'coefficients_all': self.coefficients_all,
             'asset_names': self.asset_names,
             'confounder_names': self.confounder_names,
             'dates': self.dates,
@@ -287,7 +258,6 @@ class ORACLEVARXResult:
             alpha_optimal=checkpoint['alpha_optimal'],
             p_optimal=checkpoint['p_optimal'],
             alpha_grid=checkpoint['alpha_grid'],
-            coefficients_all=checkpoint['coefficients_all'],
             asset_names=checkpoint['asset_names'],
             confounder_names=checkpoint['confounder_names'],
             dates=checkpoint['dates'],
@@ -312,7 +282,6 @@ class ACLEVARXResult:
         alpha_optimal: Optimal alpha for each day, shape (n_days,)
         p_optimal: Optimal lag order for each day (at optimal alpha), shape (n_days,)
         alpha_grid: List of alpha values considered
-        coefficients_all: Coefficients for all alphas, shape (n_days, n_alphas, p_max, n_assets, n_assets)
         asset_names: List of asset names
         confounder_names: List of confounder names (variables included in VAR but not tradeable)
         dates: List of date strings for each forecast day
@@ -324,7 +293,6 @@ class ACLEVARXResult:
     alpha_optimal: torch.Tensor
     p_optimal: torch.Tensor
     alpha_grid: List[float]
-    coefficients_all: torch.Tensor
     asset_names: List[str]
     confounder_names: List[str]
     dates: List[str]
@@ -340,67 +308,11 @@ class ACLEVARXResult:
         """Returns number of alpha values in grid."""
         return len(self.alpha_grid)
 
-    @property
-    def coefficients(self) -> torch.Tensor:
-        """Returns coefficients indexed by optimal alpha for each day.
-
-        Returns:
-            Tensor with shape (n_days, p_max, n_assets, n_assets)
-        """
-        # For each day, select the coefficients corresponding to the optimal alpha
-        n_days = self.coefficients_all.shape[0]
-        p_max = self.coefficients_all.shape[2]
-        n_assets = self.coefficients_all.shape[3]
-
-        # Initialize output tensor
-        result = torch.zeros(n_days, p_max, n_assets, n_assets,
-                           device=self.coefficients_all.device,
-                           dtype=self.coefficients_all.dtype)
-
-        # For each day, extract coefficients at optimal alpha
-        for day_idx in range(n_days):
-            alpha_idx = self.alpha_optimal[day_idx].long().item()
-            result[day_idx] = self.coefficients_all[day_idx, alpha_idx]
-
-        return result
-
     def to_dataframe(self) -> pd.DataFrame:
         """Convert forecasts to DataFrame with dates as index and assets as columns."""
         return pd.DataFrame(
             self.forecasts.cpu().numpy().T,
             index=self.dates,
-            columns=self.asset_names
-        )
-
-    def get_leadlag_matrix(self, day_idx: int, lag: int, alpha_idx: Optional[int] = None) -> pd.DataFrame:
-        """Extract lead-lag coefficient matrix for a specific day, lag, and alpha.
-
-        Args:
-            day_idx: Index of the forecast day
-            lag: Lag order (1-indexed)
-            alpha_idx: Index into alpha_grid (default: None, uses optimal alpha for the day)
-
-        Returns:
-            DataFrame with shape (n_assets, n_assets)
-        """
-        p_max = self.coefficients_all.shape[2]
-
-        if not 1 <= lag <= p_max:
-            raise ValueError(f"Lag must be in range [1, {p_max}], got {lag}")
-        if not 0 <= day_idx < len(self.dates):
-            raise ValueError(f"Day index must be in range [0, {len(self.dates)}), got {day_idx}")
-
-        if alpha_idx is None:
-            alpha_idx = self.alpha_optimal[day_idx].long().item()
-        else:
-            if not 0 <= alpha_idx < self.n_alphas:
-                raise ValueError(f"Alpha index must be in range [0, {self.n_alphas}), got {alpha_idx}")
-
-        coef_matrix = self.coefficients_all[day_idx, alpha_idx, lag - 1].cpu().numpy()
-
-        return pd.DataFrame(
-            coef_matrix,
-            index=self.asset_names,
             columns=self.asset_names
         )
 
@@ -413,7 +325,6 @@ class ACLEVARXResult:
             'alpha_optimal': self.alpha_optimal,
             'p_optimal': self.p_optimal,
             'alpha_grid': self.alpha_grid,
-            'coefficients_all': self.coefficients_all,
             'asset_names': self.asset_names,
             'confounder_names': self.confounder_names,
             'dates': self.dates,
@@ -440,7 +351,6 @@ class ACLEVARXResult:
             alpha_optimal=checkpoint['alpha_optimal'],
             p_optimal=checkpoint['p_optimal'],
             alpha_grid=checkpoint['alpha_grid'],
-            coefficients_all=checkpoint['coefficients_all'],
             asset_names=checkpoint['asset_names'],
             confounder_names=checkpoint.get('confounder_names', []),
             dates=checkpoint['dates'],

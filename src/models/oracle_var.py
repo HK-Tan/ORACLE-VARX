@@ -121,7 +121,7 @@ def fit_oraclevarx_batched(
         verbose: If True, print detailed progress
 
     Returns:
-        ORACLEVARXResult with forecasts, coefficients_all, alpha_optimal, p_optimal
+        ORACLEVARXResult with forecasts, alpha_optimal, p_optimal
 
     Output Shape:
         n_output_days = (n_days - lookback) - validation_days  (CLEAN formula!)
@@ -371,24 +371,6 @@ def fit_oraclevarx_batched(
     # Memory cleanup after forecasts_all construction
     gc.collect()
 
-    # =========================================================================
-    # Construct coefficients_all for ORACLEVARXResult
-    # =========================================================================
-    # coefficients_all should have shape (n_output_days, n_alphas, p_max, n_assets, n_assets)
-    # For each (day, α), we use coefficients for lags [1, ..., p_α[day, α]]
-    coefficients_all = torch.zeros(
-        n_output_days, n_alphas, p_max, n_assets, n_assets,
-        device=device, dtype=dtype
-    )
-
-    for alpha_idx in range(n_alphas):
-        for d in range(n_output_days):
-            day_idx_full = validation_days + d
-            p_selected = p_alpha_all[day_idx_full, alpha_idx].item()
-            # Copy coefficients for lags [0, ..., p_selected-1] (0-indexed)
-            coefficients_all[d, alpha_idx, :p_selected, :, :] = theta_all[day_idx_full, :p_selected, :, :]
-
-    # Memory cleanup after coefficients_all construction
     del theta_all
     gc.collect()
 
@@ -411,7 +393,6 @@ def fit_oraclevarx_batched(
         alpha_optimal=alpha_optimal_output,
         p_optimal=p_optimal_output,
         alpha_grid=alpha_grid,
-        coefficients_all=coefficients_all,
         asset_names=asset_names,
         confounder_names=confounder_names,
         dates=dates,
