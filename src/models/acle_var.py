@@ -276,7 +276,7 @@ def fit_aclevarx(
         verbose: If True, print detailed progress
 
     Returns:
-        ACLEVARXResult with forecasts, coefficients_all, alpha_optimal, p_optimal
+        ACLEVARXResult with forecasts, alpha_optimal, p_optimal
 
     Output Shape:
         n_output_days = (n_days - lookback_var) - validation_days  (CLEAN formula!)
@@ -494,23 +494,6 @@ def fit_aclevarx(
         p_idx = (p_alpha_output[:, alpha_idx] - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
         forecasts_all[:, :, alpha_idx] = torch.gather(forecasts_sliced, dim=2, index=p_idx).squeeze(-1)
 
-    # =========================================================================
-    # Construct coefficients_all for ACLEVARXResult
-    # =========================================================================
-    # coefficients_all should have shape (n_output_days, n_alphas, p_max, n_assets, n_assets)
-    # For each (day, alpha), we use coefficients for lags [1, ..., p_alpha[day, alpha]]
-    coefficients_all = torch.zeros(
-        n_output_days, n_alphas, p_max, n_assets, n_assets,
-        device=device, dtype=dtype
-    )
-
-    for alpha_idx in range(n_alphas):
-        for d in range(n_output_days):
-            day_idx_full = validation_days + d
-            p_selected = p_alpha_all[day_idx_full, alpha_idx].item()
-            # Copy coefficients for lags [0, ..., p_selected-1] (0-indexed)
-            coefficients_all[d, alpha_idx, :p_selected, :, :] = theta_all[day_idx_full, :p_selected, :, :]
-
     # Trim arrays to output days
     p_optimal_all_output = p_alpha_all[validation_days:, :]  # (n_output_days, n_alphas)
     # alpha_optimal is already (n_output_days,) from Phase 3
@@ -530,7 +513,6 @@ def fit_aclevarx(
         alpha_optimal=alpha_optimal_output,
         p_optimal=p_optimal_output,
         alpha_grid=alpha_grid,
-        coefficients_all=coefficients_all,
         asset_names=asset_names,
         confounder_names=[],  # No confounders in base ACLE-VARX (added in post-processing if needed)
         dates=dates,

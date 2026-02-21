@@ -11,6 +11,8 @@ from src.evaluation.backtest import run_backtest
 from src.evaluation.plotting import (
     plot_strategy_comparison,
     plot_lag_analysis,
+    plot_coefficient_heatmap,
+    plot_coefficient_evolution_per_p,
     get_performance_metrics,
 )
 
@@ -19,5 +21,7 @@ __all__ = [
     "run_backtest",
     "plot_strategy_comparison",
     "plot_lag_analysis",
+    "plot_coefficient_heatmap",
+    "plot_coefficient_evolution_per_p",
     "get_performance_metrics",
 ]

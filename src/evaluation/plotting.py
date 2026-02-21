@@ -6,12 +6,14 @@ This module provides visualization functions for:
 - Performance metrics calculation
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union
 
 
 def get_performance_metrics(
@@ -284,3 +286,228 @@ def print_performance_summary(
     print("-" * 60)
 
     return pd.DataFrame(results)
+
+
+def plot_coefficient_heatmap(
+    heatmap_df: pd.DataFrame,
+    title: str = None,
+    save_path: str = None,
+    show_plot: bool = True,
+    figsize: tuple = None,
+    cmap: str = "RdBu_r",
+    vmax: float = None,
+    annotate: bool = True,
+    lag_separators: bool = True,
+) -> None:
+    """Plot a heatmap of regression coefficients across lags.
+
+    Visualizes coefficient magnitudes where rows are outcome assets and
+    columns are lagged treatment assets grouped by lag order.
+
+    Args:
+        heatmap_df: DataFrame from get_coefficient_heatmap_matrix().
+            Index = outcome assets, columns = lagged assets like "XLY(L1)".
+        title: Custom title. If None, uses default.
+        save_path: Path to save the plot. If None, plot is not saved.
+        show_plot: Whether to display the plot interactively.
+        figsize: Figure size as (width, height). If None, auto-sized.
+        cmap: Matplotlib colormap name (default: "RdBu_r").
+        vmax: Maximum absolute value for symmetric color scale.
+            If None, uses max absolute value in data.
+        annotate: Whether to annotate cells with values.
+            Auto-disabled when columns > 45.
+        lag_separators: Whether to draw vertical lines between lag groups.
+    """
+    n_rows, n_cols = heatmap_df.shape
+    data = heatmap_df.values
+
+    # Auto-disable annotations for wide heatmaps
+    if n_cols > 45:
+        annotate = False
+
+    # Auto-size figure
+    if figsize is None:
+        w = max(8, n_cols * 0.7 + 2)
+        h = max(4, n_rows * 0.5 + 2)
+        figsize = (w, h)
+
+    # Symmetric color scale centered at 0
+    if vmax is None:
+        vmax = np.abs(data).max()
+    if vmax == 0:
+        vmax = 1.0
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    im = ax.imshow(data, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+
+    # Axis labels
+    ax.set_xticks(np.arange(n_cols))
+    asset_names = [col.split("(")[0] for col in heatmap_df.columns]
+    ax.set_xticklabels(asset_names, rotation=90, fontsize=10)
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_yticklabels(heatmap_df.index, fontsize=10)
+
+    # Detect lag groups from column names for separators and group labels
+    n_assets = n_rows  # assume square per lag block
+    n_lags = n_cols // n_assets if n_assets > 0 else 1
+
+    if lag_separators and n_lags > 1:
+        for k in range(1, n_lags):
+            ax.axvline(x=k * n_assets - 0.5, color="black", linewidth=1.5)
+
+        # Add "Lag k" group labels via secondary x-axis
+        sec = ax.secondary_xaxis('top')
+        centers = [k * n_assets + (n_assets - 1) / 2 for k in range(n_lags)]
+        sec.set_xticks(centers, labels=[f'Lag {k+1}' for k in range(n_lags)])
+        sec.tick_params('x', length=0, labelsize=9, pad=2)
+
+    # Annotate cells
+    if annotate:
+        fontsize = max(5, 8 - n_cols // 15)
+        for i in range(n_rows):
+            for j in range(n_cols):
+                val = data[i, j]
+                color = "white" if np.abs(val) > vmax * 0.7 else "black"
+                ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                        fontsize=fontsize, color=color)
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Coefficient", fontsize=10)
+
+    if title is not None:
+        ax.set_title(title, fontsize=13, pad=30)
+    else:
+        ax.set_title("Coefficient Heatmap", fontsize=13, pad=30)
+
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_coefficient_evolution_per_p(
+    per_p_coefs,
+    title: str = "Coefficient Evolution",
+    save_path: Optional[str] = None,
+    show_plot: bool = False,
+    cmap: str = "RdBu_r",
+    vmax: Optional[float] = None,
+) -> None:
+    """Plot p* x p* grid showing genuine per-p coefficient evolution.
+
+    Each row shows coefficients from a VAR(row) fit (not truncated VAR(p_max)).
+    Each column shows a specific lag's coefficient matrix.
+    Cells where lag > model order are left blank (zero).
+
+             Lag 1      Lag 2      Lag 3     ...   Lag p*
+    VAR(1)   [A_1]      [zero]     [zero]          [zero]
+    VAR(2)   [A_1]      [A_2]      [zero]          [zero]
+    VAR(3)   [A_1]      [A_2]      [A_3]           [zero]
+    ...
+    VAR(p*)  [A_1]      [A_2]      [A_3]     ...   [A_p*]
+
+    Args:
+        per_p_coefs: PerPCoefficients instance from refit functions.
+        title: Overall figure title.
+        save_path: Path to save the plot. If None, plot is not saved.
+        show_plot: Whether to display the plot interactively.
+        cmap: Matplotlib colormap name.
+        vmax: Maximum absolute value for symmetric color scale.
+    """
+    p_star = per_p_coefs.p_star
+    asset_names = per_p_coefs.asset_names
+    n_assets = len(asset_names)
+
+    if p_star == 0:
+        return
+
+    # Compute global vmax across all coefficients
+    if vmax is None:
+        all_vals = []
+        for p, coefs in per_p_coefs.coefficients.items():
+            all_vals.append(coefs.cpu().numpy().ravel())
+        if all_vals:
+            all_vals = np.concatenate(all_vals)
+            vmax = np.abs(all_vals).max()
+        else:
+            vmax = 1.0
+    if vmax == 0:
+        vmax = 1.0
+
+    # Figure sizing
+    cell_w = max(2.0, 3.5 - 0.1 * p_star)
+    cell_h = cell_w
+    fig, axes = plt.subplots(
+        p_star, p_star,
+        figsize=(p_star * cell_w + 2.0, p_star * cell_h + 1.5),
+        squeeze=False,
+        constrained_layout=True,
+    )
+
+    im = None
+    for row in range(p_star):  # row = model order (VAR(row+1))
+        model_p = row + 1
+        coefs = per_p_coefs.coefficients.get(model_p)
+
+        for col in range(p_star):  # col = lag index
+            ax = axes[row, col]
+            lag = col + 1
+
+            if lag > model_p or coefs is None:
+                # Blank cell: lag exceeds model order
+                ax.set_facecolor('#f0f0f0')
+                ax.set_xticks([])
+                ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_visible(True)
+                    spine.set_color('#cccccc')
+                continue
+
+            # Extract lag block: coefs shape is (model_p, n_assets, n_assets)
+            block = coefs[col].cpu().numpy()  # (n_assets, n_assets)
+
+            im = ax.imshow(block, aspect="equal", cmap=cmap, vmin=-vmax, vmax=vmax)
+
+            ax.set_xticks(np.arange(n_assets))
+            ax.set_yticks(np.arange(n_assets))
+
+            # X-labels: bottom row only
+            if row == p_star - 1:
+                ax.set_xticklabels(asset_names, rotation=90, fontsize=7)
+            else:
+                ax.set_xticklabels([])
+
+            # Y-labels: leftmost column only
+            if col == 0:
+                ax.set_yticklabels(asset_names, fontsize=7)
+            else:
+                ax.set_yticklabels([])
+
+        # Row label (left side)
+        axes[row, 0].set_ylabel(f"VAR({model_p})", fontsize=9, fontweight='bold')
+
+    # Column labels (top)
+    for col in range(p_star):
+        axes[0, col].set_title(f"Lag {col + 1}", fontsize=9, fontweight='bold')
+
+    # Shared colorbar
+    if im is not None:
+        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.8, pad=0.02)
+        cbar.set_label("Coefficient", fontsize=10)
+
+    fig.suptitle(title, fontsize=13)
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)

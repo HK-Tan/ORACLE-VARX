@@ -53,6 +53,8 @@ from src.evaluation import (
     plot_strategy_comparison,
     plot_lag_analysis,
 )
+from src.models.coefficient_refit import refit_var_coefficients_for_day, get_target_days
+from src.evaluation.plotting import plot_coefficient_evolution_per_p
 from src.evaluation.backtest import save_experiment_results
 from src.evaluation.plotting import print_performance_summary
 
@@ -195,7 +197,6 @@ def main(
         alpha_optimal=result.alpha_optimal,
         p_optimal=result.p_optimal,
         alpha_grid=result.alpha_grid,
-        coefficients_all=result.coefficients_all[:, :, :, etf_indices, :][:, :, :, :, etf_indices],
         asset_names=etf_only_tickers,
         confounder_names=["VIX"],  # VIX included in VAR but not tradeable
         dates=result.dates,
@@ -311,6 +312,26 @@ def main(
         show_plot=show_plots,
     )
     print(f"  Saved: {strategy_plot_raw_path}")
+
+    # Plot 4+: Per-p coefficient evolution for target days
+    targets = get_target_days(result)
+    for label, result_day_idx in targets:
+        abs_day_idx = lookback + validation_days + result_day_idx
+        p_star = int(result.p_optimal[result_day_idx].item())
+        date_str = result.dates[result_day_idx]
+
+        per_p_coefs = refit_var_coefficients_for_day(
+            Y=Y_model, day_idx=abs_day_idx, p_star=p_star,
+            lookback=lookback, asset_names=model_tickers, date=date_str,
+        )
+
+        save_path = experiment_dir / f"coefficient_evolution_{label}.png"
+        plot_coefficient_evolution_per_p(
+            per_p_coefs,
+            title=f"ACLE-VARX: Coefficient Evolution p*={p_star} ({date_str})",
+            save_path=str(save_path), show_plot=show_plots,
+        )
+        print(f"  Saved: {save_path}")
 
     # =========================================================================
     # Step 5: Save Results

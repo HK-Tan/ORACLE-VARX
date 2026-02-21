@@ -853,18 +853,6 @@ def fit_oraclevarx_tabpfn(
         p_idx = (p_alpha_output[:, alpha_idx] - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
         forecasts_all_output[:, :, alpha_idx] = torch.gather(forecasts_sliced, dim=2, index=p_idx).squeeze(-1)
 
-    # Build coefficients_all: (n_output_days, n_alphas, p_max, n_assets, n_assets)
-    coefficients_all = torch.zeros(
-        n_output_days, n_alphas, p_max, n_assets, n_assets,
-        device=dev, dtype=dtype
-    )
-
-    for alpha_idx in range(n_alphas):
-        for d in range(n_output_days):
-            day_idx_full = validation_days + d
-            p_selected = p_alpha_all[day_idx_full, alpha_idx].item()
-            coefficients_all[d, alpha_idx, :p_selected, :, :] = theta_all[day_idx_full, :p_selected, :, :]
-
     p_optimal_all_output = p_alpha_all[validation_days:, :]
     SE_all_output = SE_all
 
@@ -878,7 +866,6 @@ def fit_oraclevarx_tabpfn(
         alpha_optimal=alpha_optimal,
         p_optimal=p_optimal_all_days,
         alpha_grid=alpha_grid,
-        coefficients_all=coefficients_all,
         asset_names=asset_names,
         confounder_names=confounder_names,
         dates=dates,
