@@ -93,7 +93,7 @@ def get_phase_commands(phase: int, n_jobs: int = None, verbose: bool = True) -> 
             f"OPENBLAS_NUM_THREADS={threads}"
         )
         return [
-            f"{thread_env} {SCRIPT} --confounders {conf} --learner {learner} --dml-only --no-show{verbose_arg} --n-jobs {threads}"
+            f"{thread_env} {SCRIPT} --confounders {conf} --learner {learner} --no-show{verbose_arg} --n-jobs {threads}"
             for learner in LEARNERS
         ]
     else:
