@@ -5,10 +5,11 @@
 ```text
 ORACLE-VARX/
 ├── scripts/
-│   ├── example_var_usage.py      # VAR benchmarking (WORKING)
-│   ├── example_data_usage.py     # Data loading demo (WORKING)
-│   ├── cpu_vs_gpu_analysis_varx.md
-│   └── explain_var_and_orvarx.md
+│   ├── example_var_usage.py      # VAR benchmarking
+│   ├── example_data_usage.py     # Data loading demo
+│   ├── run_var_experiment.py     # VAR experiment runner
+│   ├── run_orvarx_experiment.py  # OR-VARX experiment runner
+│   └── ...
 ├── src/
 │   ├── data/
 │   │   ├── __init__.py
@@ -16,25 +17,27 @@ ORACLE-VARX/
 │   │   └── loader.py             # Data loading functions
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── base.py               # Abstract base class
-│   │   ├── var_pytorch.py        # VAR (WORKING)
-│   │   ├── dml_pytorch.py        # OR-VARX (NEEDS VALIDATION)
-│   │   ├── oracle_var.py         # ORACLE-VARX (NEEDS VALIDATION)
-│   │   └── results.py            # VARXResult, ORACLEVARXResult
-│   └── modules/
-│       ├── __init__.py
-│       ├── batch_utils.py        # Shared batched OLS
-│       ├── config.py             # RollingWindowConfig
-│       ├── grid_config.py        # Grid configuration (separate lookbacks)
-│       ├── validation.py         # RMSE, optimal p/alpha selection
-│       ├── rolling_split.py      # CV splitter for DML cross-fitting
-│       ├── model_cache.py        # Model caching for fold reuse
-│       └── factory.py            # Learner factory (NEEDS VALIDATION)
-├── plans/                        # Keep all old plans for reference
+│   │   ├── var_pytorch.py        # VAR — batched PyTorch
+│   │   ├── dml_pytorch.py        # OR-VARX — grid-based DML
+│   │   ├── oracle_var.py         # ORACLE-VARX — significance-based lag selection
+│   │   ├── oracle_var_tabpfn.py  # ORACLE-VARX with TabPFN first-stage
+│   │   └── acle_var.py           # ACLE-VARX — adaptive lag selection
+│   ├── evaluation/
+│   │   ├── __init__.py
+│   │   ├── pnl.py                # calculate_pnl (trading strategies)
+│   │   ├── plotting.py           # plot_strategy_comparison, plot_lag_analysis
+│   │   └── backtest.py           # run_backtest bridging function
+│   ├── modules/
+│   │   ├── __init__.py
+│   │   ├── batch_utils.py        # Shared batched OLS
+│   │   ├── batched_tabpfn.py     # Batched TabPFN inference
+│   │   ├── grid_config.py        # Grid configuration (separate lookbacks)
+│   │   └── factory.py            # Learner factory
+│   └── results.py                # VARXResult, ORACLEVARXResult
+├── results/                      # Saved experiment results (7 methods)
+├── plans/                        # All plans for reference
 ├── docs/
 ├── old-code/                     # Legacy code (untouched)
-├── Dockerfile
-├── pyproject.toml
 └── requirements.txt
 ```
 
@@ -46,7 +49,9 @@ ORACLE-VARX/
 | ----- | ----- | ------ | ----- |
 | 1 | VAR | DONE | Batched PyTorch, GPU-accelerated |
 | 2 | OR-VARX | DONE | Grid-based memoization + vectorized batched OLS |
-| 3 | ORACLE-VARX | NEXT | DML working, needs validation |
+| 3 | ORACLE-VARX | DONE | Significance-based lag selection with DML |
+| 4 | ACLE-VARX | DONE | Adaptive lag selection variant |
+| 5 | TabPFN ORACLE-VARX | DONE | TabPFN as first-stage learner |
 
 ---
 
@@ -218,9 +223,9 @@ Folds are cached and reused across consecutive days. New models trained only eve
 
 ---
 
-## Phase 3: ORACLE-VARX (AFTER OR-VARX)
+## Phase 3: ORACLE-VARX (COMPLETED)
 
-**Goal:** Validate the significance-based lag selection that adaptively chooses p based on statistical significance of coefficients.
+**Goal:** Significance-based lag selection that adaptively chooses p based on statistical significance of coefficients.
 
 **Files:** `src/models/oracle_var.py` - `oracle_significance_test()`, `fit_oracle_varx()`
 
@@ -337,90 +342,65 @@ dataset/
 
 ---
 
-## Immediate Next Steps
+## Phase 4: ACLE-VARX (COMPLETED)
 
-### Step 1: Validate OR-VARX
+**Goal:** Adaptive lag selection variant using a different selection criterion.
 
-```python
-# scripts/example_orvarx_usage.py - Simple verification script
-import torch
-from src.models import fit_orvarx
-from src.modules.grid_config import GridConfig
+**Files:** `src/models/acle_var.py`
 
-# Minimal test data (1050 days = 1018 lookback + 32 output days)
-n_days = 1050
-n_assets = 10
-n_confounders = 3
-p_max = 10
-
-Y = torch.randn(n_days, n_assets)
-W = torch.randn(n_days, n_confounders)
-
-config = GridConfig()  # defaults: lookback_orvarx=1018
-
-# Fit OR-VARX
-result = fit_orvarx(
-    Y, W,
-    p_max=p_max,
-    config=config,
-    validation_days=20,
-    learner_name='extra_trees',
-)
-
-# Verify output
-expected_output_days = n_days - config.lookback_orvarx
-print(f"Output shape: {result.forecasts.shape}")
-print(f"Expected: ({n_assets}, {expected_output_days})")
-print(f"p_optimal: {result.p_optimal[0].item()}")
-print("PASS" if result.forecasts.shape[1] == expected_output_days else "FAIL")
-```
-
-### Step 2: Validate ORACLE-VARX
-
-```python
-# Create scripts/example_oracle_usage.py
-from src.models.oracle_var import fit_oracle_varx
-
-result = fit_oracle_varx(
-    Y, W,
-    alpha_grid=[0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
-    p_max=10,
-    lookback=756,
-    validation_days=20,
-    asset_names=tickers,
-    confounder_names=["VIX"],
-    dates=dates[756:],
-    learner_name='xgboost',
-    use_gpu=True,
-    include_confounder_baseline=False,
-)
-
-print(f"Method: {result.method}")  # Should be 'ORACLE-VARX'
-print(f"Alpha grid: {result.alpha_grid}")
-print(f"Coefficients shape: {result.coefficients_all.shape}")  # (252, 7, 10, 9, 9)
-```
-
-### Step 3: Compare Models
-
-After validation, compare forecasting performance:
-
-1. Run VAR, OR-VARX, ORACLE-VARX on same test period
-2. Compare RMSE on out-of-sample forecasts
-3. Visualize lead-lag matrices to see deconfounding effect
+Results saved in `results/aclevar/` and `results/aclevarx/`.
 
 ---
 
-## Future Work (After Validation)
+## Phase 5: TabPFN ORACLE-VARX (COMPLETED)
+
+**Goal:** Use TabPFN as first-stage learner in the DML pipeline instead of tree-based methods.
+
+**Files:**
+- `src/models/oracle_var_tabpfn.py` - ORACLE-VARX with TabPFN first-stage
+- `src/modules/batched_tabpfn.py` - Batched TabPFN inference utilities
+
+Results saved in `results/oraclevarx_tabpfn/`.
+
+---
+
+## Experiment Results
+
+All 7 model variants have been run with results saved:
+
+| Method | Results Directory |
+| ------ | ----------------- |
+| VAR | `results/var/` |
+| VARX | `results/varx/` |
+| OR-VARX (LightGBM) | `results/orvarx/` |
+| ORACLE-VARX (LightGBM) | `results/oraclevarx/` |
+| ORACLE-VARX (TabPFN) | `results/oraclevarx_tabpfn/` |
+| ACLE-VAR | `results/aclevar/` |
+| ACLE-VARX | `results/aclevarx/` |
+
+---
+
+## Remaining Work
+
+### Cross-Method Comparison
+- Create `scripts/compare_strategies.py` for side-by-side comparison across all 7 methods
+- Performance metrics: Sharpe ratio, max drawdown, hit rate
+
+### Test Suite
+- Unit tests for core model functions
+- Integration tests for full pipeline
+
+---
+
+## Future Work
 
 ### Cloud/Dockerization
 
 - Build Docker container for RunPod
 - S3 upload/download utilities
 - Worker script for batch processing
-- Full 5000-day backfill
 
 ### Additional Enhancements
 
 - Additional confounders (DFF, T5YIE, oil, policy uncertainty)
-- Streaming results for long runs
-- Learner comparison analysis (XGB vs LGBM vs RF vs TabPFN)
+- Expanded asset universe beyond 9 sector ETFs

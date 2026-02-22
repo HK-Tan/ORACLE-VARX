@@ -209,5 +209,5 @@ src/evaluation/
 - [x] Step 1: Create evaluation module structure
 - [x] Step 2: Port and adapt functions
 - [x] Step 3: Create experiment scripts (run_var_experiment.py, run_orvarx_experiment.py)
-- [ ] Step 4: Run experiments
-- [ ] Step 5: Generate comparison plots
+- [x] Step 4: Run experiments — all 7 methods run (VAR, VARX, OR-VARX, ORACLE-VARX, ORACLE-VARX TabPFN, ACLE-VAR, ACLE-VARX)
+- [~] Step 5: Generate comparison plots — individual per-method plots done; cross-method `compare_strategies.py` not yet created
