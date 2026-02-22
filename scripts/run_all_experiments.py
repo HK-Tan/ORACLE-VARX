@@ -5,10 +5,10 @@ This script automates the tmux parallel launch pattern for the full
 experiment matrix (16 runs -> 35 unique model outputs).
 
 Phases:
-    Phase 0: VAR + ACLE-VAR baseline (no confounders, sequential)
-    Phase 1: VIX x 4 learners (4 parallel tmux panes)
-    Phase 2: macro5 x 4 learners (4 parallel tmux panes)
-    Phase 3: all10 x 4 learners (4 parallel tmux panes)
+    Phase 0: All OLS baselines — VAR, ACLE-VAR, VARX x3, ACLE-VARX x3 (sequential)
+    Phase 1: VIX x 4 learners, DML only (4 parallel tmux panes)
+    Phase 2: macro5 x 4 learners, DML only (4 parallel tmux panes)
+    Phase 3: all10 x 4 learners, DML only (4 parallel tmux panes)
 
 Usage:
     # Run all phases sequentially
@@ -70,14 +70,19 @@ def _compute_threads_per_pane(n_panes: int) -> int:
 def get_phase_commands(phase: int, n_jobs: int = None, verbose: bool = True) -> list[str]:
     """Get the shell commands for a given phase.
 
-    Each command is prefixed with BLAS/OpenMP thread limits so that
-    parallel panes don't over-subscribe CPU cores.
+    Phase 0 returns multiple sequential OLS commands (no tmux needed).
+    Phases 1-3 return parallel DML-only commands with BLAS thread limits.
     """
     verbose_arg = " --verbose" if verbose else ""
 
     if phase == 0:
-        # Single command — give it all cores
-        return [f"{SCRIPT} --no-confounders --no-show{verbose_arg}"]
+        # All OLS baselines — run sequentially with full CPU access
+        return [
+            f"{SCRIPT} --no-confounders --no-show{verbose_arg}",
+            f"{SCRIPT} --confounders vix --ols-only --no-show{verbose_arg}",
+            f"{SCRIPT} --confounders macro5 --ols-only --no-show{verbose_arg}",
+            f"{SCRIPT} --confounders all10 --ols-only --no-show{verbose_arg}",
+        ]
     elif phase in CONFOUNDER_CONFIGS:
         conf = CONFOUNDER_CONFIGS[phase]
         n_panes = len(LEARNERS)
@@ -88,16 +93,40 @@ def get_phase_commands(phase: int, n_jobs: int = None, verbose: bool = True) -> 
             f"OPENBLAS_NUM_THREADS={threads}"
         )
         return [
-            f"{thread_env} {SCRIPT} --confounders {conf} --learner {learner} --no-show{verbose_arg} --n-jobs {threads}"
+            f"{thread_env} {SCRIPT} --confounders {conf} --learner {learner} --dml-only --no-show{verbose_arg} --n-jobs {threads}"
             for learner in LEARNERS
         ]
     else:
         raise ValueError(f"Unknown phase: {phase}. Valid: 0, 1, 2, 3, all")
 
 
-def run_phase_tmux(phase: int, commands: list[str], dry_run: bool = False):
-    """Launch commands in tmux panes for parallel execution."""
+def run_phase_tmux(phase: int, commands: list[str], dry_run: bool = False,
+                   sequential: bool = False):
+    """Launch commands in tmux panes for parallel execution.
+
+    Args:
+        phase: Phase number (for display and tmux session naming).
+        commands: Shell commands to run.
+        dry_run: If True, print commands without executing.
+        sequential: If True, run all commands sequentially via subprocess.run()
+            instead of tmux. Used for Phase 0 (OLS baselines).
+    """
     session_name = f"phase{phase}"
+
+    if sequential:
+        # Run all commands one at a time — no tmux needed
+        print(f"\n  Phase {phase}: Running {len(commands)} commands sequentially:")
+        for i, cmd in enumerate(commands, 1):
+            print(f"    [{i}/{len(commands)}] {cmd}")
+        if dry_run:
+            return
+
+        for i, cmd in enumerate(commands, 1):
+            print(f"\n  [{i}/{len(commands)}] Running: {cmd}")
+            result = subprocess.run(cmd, shell=True)
+            if result.returncode != 0:
+                print(f"  WARNING: Command {i} exited with code {result.returncode}")
+        return
 
     if len(commands) == 1:
         # Single command — just run directly
@@ -206,10 +235,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Phases:
-  0: VAR + ACLE-VAR baseline (no confounders, sequential)
-  1: VIX x 4 tree learners (parallel)
-  2: macro5 x 4 tree learners (parallel)
-  3: all10 x 4 tree learners (parallel)
+  0: All OLS baselines — VAR, ACLE-VAR, VARX x3, ACLE-VARX x3 (sequential)
+  1: VIX x 4 tree learners, DML only (parallel)
+  2: macro5 x 4 tree learners, DML only (parallel)
+  3: all10 x 4 tree learners, DML only (parallel)
   all: Run phases 0-3 sequentially
 
 Example workflow on c7i.4xlarge:
@@ -245,7 +274,8 @@ Example workflow on c7i.4xlarge:
         print(f"{'=' * 60}")
 
         commands = get_phase_commands(phase, n_jobs=args.n_jobs, verbose=args.verbose)
-        run_phase_tmux(phase, commands, dry_run=args.dry_run)
+        run_phase_tmux(phase, commands, dry_run=args.dry_run,
+                       sequential=(phase == 0))
 
         phase_elapsed = time.perf_counter() - phase_start
         print(f"  Phase {phase} complete: {phase_elapsed:.0f}s ({phase_elapsed/60:.1f} min)")
@@ -258,10 +288,10 @@ Example workflow on c7i.4xlarge:
 
 def _phase_description(phase: int) -> str:
     descs = {
-        0: "VAR + ACLE-VAR baseline (no confounders)",
-        1: "VIX x 4 learners",
-        2: "macro5 x 4 learners",
-        3: "all10 x 4 learners",
+        0: "All OLS baselines (VAR, ACLE-VAR, VARX x3, ACLE-VARX x3)",
+        1: "VIX x 4 learners (DML only)",
+        2: "macro5 x 4 learners (DML only)",
+        3: "all10 x 4 learners (DML only)",
     }
     return descs.get(phase, f"Unknown phase {phase}")
 

@@ -45,13 +45,13 @@ The orchestrator (`run_all_experiments.py`) organizes work into 4 CPU phases plu
 
 | Phase | What it runs | Methods produced | CPU/GPU |
 |-------|-------------|-----------------|---------|
-| **Phase 0** | VAR + ACLE-VAR baseline (no confounders) | VAR x 1, ACLE-VAR x 1 | CPU |
-| **Phase 1** | VIX x 4 learners (parallel tmux panes) | VARX, ACLE-VARX, OR-VARX x4, ORACLE-VARX x4 | CPU |
+| **Phase 0** | All OLS baselines (sequential) | VAR x1, ACLE-VAR x1, VARX x3, ACLE-VARX x3 | CPU |
+| **Phase 1** | VIX x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **Phase 2** | macro5 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **Phase 3** | all10 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **TabPFN** | 3 confounder presets (run manually) | ORACLE-VARX-TabPFN x3 | **GPU** |
 
-VARX and ACLE-VARX are OLS-only (no learner dependency) — they are computed once per confounder preset in the first learner run and skipped for subsequent learners.
+Phase 0 runs all OLS methods sequentially with full CPU access. Phases 1-3 run only DML methods (`--dml-only`), evenly distributed across 4 tmux panes.
 
 ## 4. Prerequisites
 
@@ -152,6 +152,22 @@ python scripts/run_all_experiments.py --phase 1 --verbose
 python scripts/run_all_experiments.py --phase all --dry-run
 ```
 
+#### tmux pane layout
+
+Each phase (1-3) launches a 2x2 tmux grid. The panes map to learners as follows:
+
+```
+┌──────────────────┬─────────────────-----─┐
+│  Pane 0: lgbm    │  Pane 1: xgboost      │
+├──────────────────┼──────────────────-----┤
+│  Pane 2: rf      │  Pane 3: extra_trees  │
+└──────────────────┴──────────────────-----┘
+```
+
+Navigate between panes with `Ctrl-b` then arrow keys. Scroll up in a pane with `Ctrl-b [` (press `q` to exit scroll mode). Detach with `Ctrl-b d`.
+
+BLAS thread limits (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) and `--n-jobs` are automatically set per pane to avoid CPU over-subscription.
+
 ### TabPFN (GPU)
 
 Run on a machine with an NVIDIA GPU:
@@ -185,6 +201,8 @@ Runs up to 4 methods for a single (confounder preset, learner) pair with amortiz
 | `--output-dir` | str | `results` | Base results directory |
 | `--no-show` | flag | — | Don't display plots (use on headless servers) |
 | `--verbose` | flag | — | Print detailed progress |
+| `--ols-only` | flag | — | In confounders mode, run only VARX + ACLE-VARX (skip DML). No effect with `--no-confounders`. |
+| `--dml-only` | flag | — | In confounders mode, skip VARX + ACLE-VARX (run only DML methods). Cannot combine with `--no-confounders`. |
 
 ### `run_all_experiments.py`
 
