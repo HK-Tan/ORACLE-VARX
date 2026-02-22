@@ -94,33 +94,10 @@ def batched_ols(
     XtX = torch.bmm(X_batch.transpose(1, 2), X_batch)  # (batch, n_features, n_features)
     XtY = torch.bmm(X_batch.transpose(1, 2), Y_batch)  # (batch, n_features, n_targets)
 
-    if rcond is not None:
-        # Use lstsq for regularization (slower but more robust)
-        # lstsq returns (solution, residuals, rank, singular_values)
-        # We need to iterate over batch since lstsq doesn't support batched input well
-        batch_size = X_batch.shape[0]
-        n_features = X_batch.shape[2]
-        n_targets = Y_batch.shape[2]
-        device = X_batch.device
-        dtype = X_batch.dtype
-
-        beta = torch.zeros(batch_size, n_features, n_targets, device=device, dtype=dtype)
-        for i in range(batch_size):
-            solution = torch.linalg.lstsq(XtX[i], XtY[i], rcond=rcond)
-            beta[i] = solution.solution
-        return beta
-
-    # Use solve for speed (assumes non-singular X'X)
-    try:
-        beta = torch.linalg.solve(XtX, XtY)  # (batch, n_features, n_targets)
-    except torch.linalg.LinAlgError as e:
-        raise RuntimeError(
-            f"Singular matrix encountered in batched OLS. "
-            f"This may indicate multicollinearity or insufficient data. "
-            f"Consider using rcond parameter for regularization or checking input data."
-        ) from e
-
-    return beta
+    # Use lstsq: batched, handles singular matrices gracefully.
+    # Default rcond=None lets PyTorch use eps * max(m, n), which adapts
+    # to dtype and matrix size — safer than a hardcoded threshold.
+    return torch.linalg.lstsq(XtX, XtY, rcond=rcond).solution
 
 
 def batched_benjamini_hochberg(p_values: torch.Tensor, alpha: float) -> torch.Tensor:
