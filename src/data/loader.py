@@ -19,6 +19,7 @@ import torch
 
 from src.data.constants import (
     CONFOUNDER_FILES,
+    CONFOUNDER_PRESETS,
     DATA_DIR,
     DEFAULT_LOOKBACK_DAYS,
     ETFS,
@@ -147,8 +148,8 @@ def load_opcl_with_vix(
     extra_days = n_days + 1 if n_days is not None else None
     etf_df = load_opcl_data(tickers=etf_tickers, n_days=extra_days)
 
-    # Load VIX levels
-    vix_series = load_confounder("VIX", n_days=None)
+    # Load VIX levels (raw, not log returns — we convert manually below)
+    vix_series = load_confounder("VIX", n_days=None, log_returns=False)
 
     # Convert VIX levels to log returns: ln(VIX_t / VIX_{t-1})
     # Shift by 1 to get previous day's value
@@ -179,9 +180,92 @@ def load_opcl_with_vix(
     return merged_df
 
 
+def load_opcl_with_confounders(
+    confounder_names: List[str],
+    etf_tickers: Optional[List[str]] = None,
+    n_days: Optional[int] = None,
+) -> pd.DataFrame:
+    """Load OPCL returns for ETFs plus confounders as endogenous log returns.
+
+    Generalizes load_opcl_with_vix() for any set of confounders. Each confounder
+    is converted to log returns via load_confounder(log_returns=True) and included
+    as an endogenous variable in the DataFrame.
+
+    Args:
+        confounder_names: List of confounder names (keys in CONFOUNDER_FILES).
+                         Can also be a preset name from CONFOUNDER_PRESETS
+                         (e.g., "vix", "macro5", "all10").
+        etf_tickers: List of ETF tickers to load. If None, uses ETFS (9 ETFs).
+        n_days: Number of days to load from start. If None, loads all days.
+
+    Returns:
+        DataFrame with shape (n_days, n_tickers + n_confounders), DatetimeIndex,
+        columns are ETF tickers + confounder names. Index is sorted chronologically.
+
+    Raises:
+        FileNotFoundError: If OPCL_FILE or any confounder file does not exist.
+        ValueError: If any requested ticker/confounder is not found.
+        KeyError: If preset name is not found in CONFOUNDER_PRESETS.
+
+    Example:
+        >>> df = load_opcl_with_confounders(["VIX", "DFF"], n_days=100)
+        >>> df.columns.tolist()
+        ['XLY', 'XLP', 'XLE', 'XLF', 'XLV', 'XLI', 'XLB', 'XLK', 'XLU', 'VIX', 'DFF']
+    """
+    from src.data.constants import CONFOUNDER_PRESETS
+
+    # Resolve preset name to list of confounder names
+    if isinstance(confounder_names, str):
+        if confounder_names in CONFOUNDER_PRESETS:
+            confounder_names = CONFOUNDER_PRESETS[confounder_names]
+        else:
+            raise KeyError(
+                f"Unknown confounder preset '{confounder_names}'. "
+                f"Available presets: {list(CONFOUNDER_PRESETS.keys())}. "
+                f"Or pass a list of confounder names."
+            )
+
+    if etf_tickers is None:
+        etf_tickers = ETFS
+
+    # Load ETF returns (already in return format)
+    # Load extra days since confounders lose one day from log return conversion
+    extra_days = n_days + 1 if n_days is not None else None
+    etf_df = load_opcl_data(tickers=etf_tickers, n_days=extra_days)
+
+    # Load each confounder as log returns
+    confounder_series = []
+    for name in confounder_names:
+        series = load_confounder(name, n_days=None, log_returns=True)
+        confounder_series.append(series)
+
+    # Filter confounders to ETF trading dates and merge
+    merged_df = etf_df.copy()
+    for series in confounder_series:
+        # Filter to ETF trading dates
+        filtered = series[series.index.isin(etf_df.index)]
+        filtered = filtered.reindex(etf_df.index)
+        merged_df[series.name] = filtered
+
+    # Backfill leading NaN confounders with 0.0 (log-return of 0 = "no change").
+    # Only fill confounder columns, not ETF columns.
+    confounder_cols = [name for name in confounder_names if name in merged_df.columns]
+    merged_df[confounder_cols] = merged_df[confounder_cols].fillna(0.0)
+
+    # Drop rows with any NaN
+    merged_df = merged_df.dropna()
+
+    # Limit to n_days if specified (after dropping NaN)
+    if n_days is not None:
+        merged_df = merged_df.iloc[:n_days]
+
+    return merged_df
+
+
 def load_confounder(
     name: str,
     n_days: Optional[int] = None,
+    log_returns: bool = True,
 ) -> pd.Series:
     """Load a single confounder variable (e.g., VIX).
 
@@ -193,6 +277,9 @@ def load_confounder(
         name: Confounder name (key in CONFOUNDER_FILES dict).
               Examples: "VIX", "DFF", "T5YIE", "DCOILWTICO", "USEPUINDXD"
         n_days: Number of days to load from start. If None, loads all days.
+        log_returns: If True (default), convert levels to log returns via
+                     ln(C_t / C_{t-1}) and backfill the first NaN. This ensures
+                     stationarity and consistency with ETF return data.
 
     Returns:
         Series with DatetimeIndex and confounder values.
@@ -261,6 +348,13 @@ def load_confounder(
         # If first values have NaN (can't forward fill), backfill
         if series.isna().any():
             series = series.bfill()
+
+    # Convert to log returns if requested
+    if log_returns:
+        import numpy as np
+        series = np.log(series / series.shift(1))
+        # Backfill the first NaN from the shift (single value, no signal)
+        series = series.bfill()
 
     return series
 
@@ -387,6 +481,10 @@ def prepare_tensors(
 
         # Reindex to ensure exact alignment and same order
         confounders = confounders.reindex(assets.index)
+
+        # Backfill leading NaN confounders with 0.0 (log-return of 0 = "no change").
+        # Preserves asset data from before late-starting confounders (e.g., GVZCLS 2008).
+        confounders = confounders.fillna(0.0)
 
         # Drop any rows with missing values (should be none after forward fill in load_confounder)
         mask = ~(assets.isna().any(axis=1) | confounders.isna().any(axis=1))

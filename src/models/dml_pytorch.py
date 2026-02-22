@@ -600,7 +600,7 @@ def get_all_required_folds(
     return sorted(all_folds)
 
 
-def _fit_orvarx_core(
+def fit_orvarx_core(
     Y: torch.Tensor,
     W: torch.Tensor,
     p_max: int = 10,
@@ -870,10 +870,12 @@ def fit_orvarx_batched(
     n_jobs: int = -1,
     verbose: bool = False,
     return_se: bool = False,
-) -> Union[VARXResult, Tuple[VARXResult, torch.Tensor]]:
+    core_results: Optional[CoreResult] = None,
+    return_core: bool = False,
+) -> Union[VARXResult, Tuple[VARXResult, torch.Tensor], Tuple[VARXResult, CoreResult], Tuple[VARXResult, torch.Tensor, CoreResult]]:
     """Fit OR-VARX model using vectorized/batched operations.
 
-    This function uses _fit_orvarx_core() for DML computation, then applies
+    This function uses fit_orvarx_core() for DML computation, then applies
     p-selection via validation RMSE and output trimming.
 
     Args:
@@ -890,6 +892,11 @@ def fit_orvarx_batched(
         n_jobs: Number of CPU cores (-1 for all, 5 recommended)
         verbose: If True, print detailed progress
         return_se: If True, compute and return standard errors (default: False)
+        core_results: Pre-computed results from fit_orvarx_core(). If provided,
+                      skips the expensive DML computation and reuses these results.
+                      Tuple of (forecasts_all, coefficients, standard_errors, actuals).
+        return_core: If True, also return the core results tuple for reuse
+                     by other methods (e.g., ORACLE-VARX).
 
     Returns:
         If return_se=False: VARXResult with is_orthogonalized=True
@@ -954,15 +961,24 @@ def fit_orvarx_batched(
     # =========================================================================
     # Call core function for DML computation (returns ALL test days, no trimming)
     # =========================================================================
-    forecasts_all, coefficients, standard_errors, actuals = _fit_orvarx_core(
-        Y=Y,
-        W=W,
-        p_max=p_max,
-        config=config,
-        learner_name=learner_name,
-        n_jobs=n_jobs,
-        verbose=verbose,
-    )
+    if core_results is not None:
+        forecasts_all, coefficients, standard_errors, actuals = core_results
+        print("  Using pre-computed core results (skipping DML first stage)")
+    else:
+        forecasts_all, coefficients, standard_errors, actuals = fit_orvarx_core(
+            Y=Y,
+            W=W,
+            p_max=p_max,
+            config=config,
+            learner_name=learner_name,
+            n_jobs=n_jobs,
+            verbose=verbose,
+        )
+
+    # Save raw core results for potential return
+    forecasts_all_raw = forecasts_all
+    coefficients_raw = coefficients
+    standard_errors_raw = standard_errors
 
     # =========================================================================
     # p-selection via validation RMSE
@@ -1002,8 +1018,12 @@ def fit_orvarx_batched(
         dates=dates,
     )
 
-    # Return tuple with SEs if requested, otherwise just the result
-    if return_se:
+    # Build return value based on what was requested
+    if return_se and return_core:
+        return result, standard_errors_output, (forecasts_all_raw, coefficients_raw, standard_errors_raw, actuals)
+    elif return_se:
         return result, standard_errors_output
+    elif return_core:
+        return result, (forecasts_all_raw, coefficients_raw, standard_errors_raw, actuals)
     else:
         return result

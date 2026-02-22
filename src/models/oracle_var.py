@@ -53,7 +53,7 @@ from typing import List, Optional
 
 from src.results import ORACLEVARXResult
 from src.modules.grid_config import GridConfig
-from src.models.dml_pytorch import _fit_orvarx_core
+from src.models.dml_pytorch import fit_orvarx_core, CoreResult
 from src.modules.batch_utils import batched_benjamini_hochberg
 from src.models.var_pytorch import rolling_alpha_selection
 
@@ -71,6 +71,7 @@ def fit_oraclevarx_batched(
     learner_name: str = 'xgboost',
     n_jobs: int = -1,
     verbose: bool = False,
+    core_results: Optional[CoreResult] = None,
 ) -> ORACLEVARXResult:
     """Fit ORACLE-VARX model using batched operations.
 
@@ -119,6 +120,9 @@ def fit_oraclevarx_batched(
         learner_name: First-stage learner ('xgboost', 'lgbm', 'rf', 'extra_trees')
         n_jobs: Number of CPU cores (-1 for all, 5 recommended)
         verbose: If True, print detailed progress
+        core_results: Pre-computed results from fit_orvarx_core(). If provided,
+                      skips the expensive DML first stage and reuses these results.
+                      Tuple of (forecasts_all, coefficients, standard_errors, actuals).
 
     Returns:
         ORACLEVARXResult with forecasts, alpha_optimal, p_optimal
@@ -201,16 +205,20 @@ def fit_oraclevarx_batched(
     # =========================================================================
     print("  Phase 1: Running core DML to get θ_all, SE_all, forecasts_all...")
 
-    # Call _fit_orvarx_core() directly - returns ALL test days, no trimming
-    forecasts_all_batched_raw, theta_all, SE_all, actuals = _fit_orvarx_core(
-        Y=Y,
-        W=W,
-        p_max=p_max,
-        config=config,
-        learner_name=learner_name,
-        n_jobs=n_jobs,
-        verbose=verbose,
-    )
+    # Call fit_orvarx_core() - returns ALL test days, no trimming
+    if core_results is not None:
+        forecasts_all_batched_raw, theta_all, SE_all, actuals = core_results
+        print("    Using pre-computed core results (skipping DML first stage)")
+    else:
+        forecasts_all_batched_raw, theta_all, SE_all, actuals = fit_orvarx_core(
+            Y=Y,
+            W=W,
+            p_max=p_max,
+            config=config,
+            learner_name=learner_name,
+            n_jobs=n_jobs,
+            verbose=verbose,
+        )
 
     # Shapes from core:
     # forecasts_all_batched_raw: (n_total_test_days, n_assets, p_max)
