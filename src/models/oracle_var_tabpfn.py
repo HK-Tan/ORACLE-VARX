@@ -99,20 +99,21 @@ def _get_vram_usage() -> Tuple[float, float, float]:
     return (used, total, percent)
 
 
-def _get_batch_size_for_p(p: int, n_folds: int, verbose: bool = False) -> int:
+def _get_batch_size_for_p(p: int, n_folds: int, n_confounders: int = 1, verbose: bool = False) -> int:
     """Get batch size for a given lag order p using size-based heuristic.
 
-    Uses formula: batch_size = (4.5 * VRAM_GB) / p^1.5
+    Uses formula: batch_size = (10 * numerator) / (p^1.5 * (9 + n_confounders))
 
-    This accounts for:
-    - Larger p means more features (n_assets * p treatment features)
-    - Memory scales super-linearly with feature count due to attention
-    - The p^1.5 exponent provides extra margin for larger p values
-    - Scales linearly with available VRAM (calibrated: 360 for 80GB)
+    where numerator = 6 * VRAM_GB. The (9 + n_confounders) term accounts for
+    total variable load: 9 assets are always present, confounders add on top.
+    With n_confounders=1 (VIX), the scaling factor is 10/10 = 1.0x, preserving
+    exact backward compatibility. With macro5 (5 confounders) it's 10/14 = 0.71x,
+    and all10 (10 confounders) gives 10/19 = 0.53x.
 
     Args:
         p: Lag order (1 to p_max)
         n_folds: Total number of folds available (for capping)
+        n_confounders: Number of confounders (default: 1 for VIX backward compat)
         verbose: Print batch size calculation
 
     Returns:
@@ -121,16 +122,19 @@ def _get_batch_size_for_p(p: int, n_folds: int, verbose: bool = False) -> int:
     # Get available VRAM
     _, total_vram_gb, _ = _get_vram_usage()
 
-    # Scale factor: 48 * (VRAM / 8) = 6 * VRAM
-    # Calibrated for 80GB → 480 numerator
+    # Scale factor: 6 * VRAM (calibrated for 80GB → 480 numerator)
     numerator = 6 * total_vram_gb
 
-    batch_size = int(numerator / (p ** 1.5))
+    # Scale down for more confounders: (9 + n_confounders) captures total variable load
+    confounder_scale = 10.0 / (9 + n_confounders)
+    batch_size = int(confounder_scale * numerator / (p ** 1.5))
     batch_size = min(batch_size, n_folds)
     batch_size = max(1, batch_size)
 
     if verbose:
-        print(f"    p={p}: batch_size = {numerator:.0f}/{p}^1.5 = {int(numerator / (p ** 1.5))} → capped to {batch_size}")
+        print(f"    p={p}: batch_size = {confounder_scale:.2f}x * {numerator:.0f}/{p}^1.5 = "
+              f"{int(confounder_scale * numerator / (p ** 1.5))} → capped to {batch_size} "
+              f"(n_confounders={n_confounders})")
 
     return batch_size
 
@@ -337,7 +341,8 @@ def fit_oraclevarx_tabpfn(
     device: str = 'cuda',
     verbose: bool = False,
     target_vram_pct: float = 0.70,
-) -> ORACLEVARXResult:
+    probe: bool = False,
+) -> Optional[ORACLEVARXResult]:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
 
     This function uses TabPFN transformer for nuisance function estimation
@@ -362,9 +367,11 @@ def fit_oraclevarx_tabpfn(
         verbose: Print detailed progress
         target_vram_pct: Target VRAM usage (default 0.70 = 70%). Batch size is
             automatically determined per p using a 2-point VRAM probe.
+        probe: If True, run 1 fold per p with batch_size=1 to empirically test
+            VRAM usage. Prints a summary table and returns None.
 
     Returns:
-        ORACLEVARXResult with forecasts and coefficients
+        ORACLEVARXResult with forecasts and coefficients, or None if probe=True.
 
     Note:
         TabPFN has limits: max 100 features, max 10,000 training samples.
@@ -419,6 +426,10 @@ def fit_oraclevarx_tabpfn(
     print(f"  p_max={p_max}, n_estimators={n_estimators}, target_vram={target_vram_pct*100:.0f}%")
     print(f"  Grid config: train_size={config.train_size}, test_size={config.test_size}")
 
+    if probe:
+        print(f"\n*** PROBE MODE: Testing 1 fold per p (p=1..{p_max}) ***")
+        print(f"*** n_confounders={n_confounders}, total features per p: (9+{n_confounders})*p ***\n")
+
     # Convert to numpy for TabPFN
     Y_np = Y.cpu().numpy().astype(np.float32)
     W_np = W.cpu().numpy().astype(np.float32)
@@ -450,6 +461,9 @@ def fit_oraclevarx_tabpfn(
         test_end = min(test_end, n_days)
 
         for p in range(1, p_max + 1):
+            # In probe mode, only keep 1 fold per p
+            if probe and len(fold_data[p]) >= 1:
+                continue
             # Build training data
             outcome_train, treatment_train, controls_train = _build_lagged_features(
                 Y_np, W_np, p, train_start, train_end
@@ -513,6 +527,9 @@ def fit_oraclevarx_tabpfn(
     forecast_Y_preds: Dict[int, Dict[int, np.ndarray]] = {p: {} for p in range(1, p_max + 1)}
     forecast_T_preds: Dict[int, Dict[int, np.ndarray]] = {p: {} for p in range(1, p_max + 1)}
 
+    # Probe mode results tracking
+    probe_results: Dict[int, Dict[str, Any]] = {}
+
     # Background VRAM monitoring thread - prints every 60 seconds during inference
     import threading
     vram_monitor_stop = threading.Event()
@@ -541,8 +558,12 @@ def fit_oraclevarx_tabpfn(
 
         p_start_time = time.time()
 
-        # Get batch size using size-based heuristic (360/p^1.5)
-        effective_batch_size = _get_batch_size_for_p(p, n_folds_p, verbose=verbose)
+        # Get batch size using size-based heuristic
+        effective_batch_size = _get_batch_size_for_p(p, n_folds_p, n_confounders=n_confounders, verbose=verbose)
+
+        if probe:
+            effective_batch_size = 1
+            print(f"\n  p={p}: PROBE mode, batch_size forced to 1")
 
         # Group folds by test size (batching requires same size)
         folds_by_test_size: Dict[int, List[int]] = {}
@@ -556,23 +577,38 @@ def fit_oraclevarx_tabpfn(
         Y_preds_all = [None] * n_folds_p
         T_preds_all = [None] * n_folds_p
 
-        for test_size, fold_indices in folds_by_test_size.items():
-            X_trains_group = [folds_p[i]['X_train'] for i in fold_indices]
-            Y_trains_Y_group = [folds_p[i]['Y_train'] for i in fold_indices]
-            Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
-            X_tests_group = [folds_p[i]['X_test'] for i in fold_indices]
+        try:
+            for test_size, fold_indices in folds_by_test_size.items():
+                X_trains_group = [folds_p[i]['X_train'] for i in fold_indices]
+                Y_trains_Y_group = [folds_p[i]['Y_train'] for i in fold_indices]
+                Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
+                X_tests_group = [folds_p[i]['X_test'] for i in fold_indices]
 
-            # Run batched TabPFN for this group
-            Y_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_tests_group, effective_batch_size)
+                # Run batched TabPFN for this group
+                Y_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_tests_group, effective_batch_size)
 
-            _clear_gpu_memory()
-            T_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_tests_group, effective_batch_size)
-            _clear_gpu_memory()
+                _clear_gpu_memory()
+                T_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_tests_group, effective_batch_size)
+                _clear_gpu_memory()
 
-            # Store results back to original fold indices
-            for group_idx, fold_idx in enumerate(fold_indices):
-                Y_preds_all[fold_idx] = Y_preds_group[group_idx]
-                T_preds_all[fold_idx] = T_preds_group[group_idx]
+                # Store results back to original fold indices
+                for group_idx, fold_idx in enumerate(fold_indices):
+                    Y_preds_all[fold_idx] = Y_preds_group[group_idx]
+                    T_preds_all[fold_idx] = T_preds_group[group_idx]
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            if probe:
+                probe_results[p] = {
+                    'status': 'OOM',
+                    'error': str(e),
+                    'controls_features': n_confounders * p,
+                }
+                print(f"    PROBE p={p}: OOM - {e}")
+                _clear_gpu_memory()
+                del fold_data[p]
+                gc.collect()
+                continue
+            else:
+                raise
 
         # Compute residuals and store by absolute row index
         first_row = min(f['test_start'] for f in folds_p)
@@ -594,45 +630,65 @@ def fit_oraclevarx_tabpfn(
         R_T_all[p] = R_T
         first_residual_row[p] = first_row
 
-        # Run separate batches for forecast predictions, grouped by forecast size
-        folds_by_forecast_size: Dict[int, List[int]] = {}
-        for fold_idx, fold in enumerate(folds_p):
-            forecast_size = len(fold['forecast_controls'])
-            if forecast_size not in folds_by_forecast_size:
-                folds_by_forecast_size[forecast_size] = []
-            folds_by_forecast_size[forecast_size].append(fold_idx)
+        if probe:
+            # In probe mode: report VRAM and skip forecast predictions
+            p_elapsed = time.time() - p_start_time
+            used, total, pct = _get_vram_usage()
+            n_ctrl_features = n_confounders * p
+            suggested_bs = _get_batch_size_for_p(p, n_folds_p, n_confounders=n_confounders)
+            probe_results[p] = {
+                'status': 'PASS',
+                'controls_features': n_ctrl_features,
+                'vram_used': used,
+                'vram_total': total,
+                'vram_pct': pct,
+                'time': p_elapsed,
+                'suggested_batch_size': suggested_bs,
+            }
+            print(f"    PROBE p={p}: PASS")
+            print(f"      Controls features: {n_ctrl_features} ({n_confounders} confounders x {p} lags)")
+            print(f"      VRAM after inference: {used:.1f}/{total:.1f} GB ({pct:.1f}%)")
+            print(f"      Time for 1 fold: {p_elapsed:.1f}s")
+        else:
+            # Run separate batches for forecast predictions, grouped by forecast size
+            folds_by_forecast_size: Dict[int, List[int]] = {}
+            for fold_idx, fold in enumerate(folds_p):
+                forecast_size = len(fold['forecast_controls'])
+                if forecast_size not in folds_by_forecast_size:
+                    folds_by_forecast_size[forecast_size] = []
+                folds_by_forecast_size[forecast_size].append(fold_idx)
 
-        Y_forecast_all = [None] * n_folds_p
-        T_forecast_all = [None] * n_folds_p
+            Y_forecast_all = [None] * n_folds_p
+            T_forecast_all = [None] * n_folds_p
 
-        for forecast_size, fold_indices in folds_by_forecast_size.items():
-            if forecast_size == 0:
-                continue
+            for forecast_size, fold_indices in folds_by_forecast_size.items():
+                if forecast_size == 0:
+                    continue
 
-            X_trains_group = [folds_p[i]['X_train'] for i in fold_indices]
-            Y_trains_Y_group = [folds_p[i]['Y_train'] for i in fold_indices]
-            Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
-            X_forecast_group = [np.array(folds_p[i]['forecast_controls'], dtype=np.float32) for i in fold_indices]
+                X_trains_group = [folds_p[i]['X_train'] for i in fold_indices]
+                Y_trains_Y_group = [folds_p[i]['Y_train'] for i in fold_indices]
+                Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
+                X_forecast_group = [np.array(folds_p[i]['forecast_controls'], dtype=np.float32) for i in fold_indices]
 
-            # Run batched TabPFN for forecast predictions
-            Y_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_forecast_group, effective_batch_size)
-            _clear_gpu_memory()
-            T_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_forecast_group, effective_batch_size)
-            _clear_gpu_memory()
+                # Run batched TabPFN for forecast predictions
+                Y_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_forecast_group, effective_batch_size)
+                _clear_gpu_memory()
+                T_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_forecast_group, effective_batch_size)
+                _clear_gpu_memory()
 
-            for group_idx, fold_idx in enumerate(fold_indices):
-                Y_forecast_all[fold_idx] = Y_forecast_group[group_idx]
-                T_forecast_all[fold_idx] = T_forecast_group[group_idx]
+                for group_idx, fold_idx in enumerate(fold_indices):
+                    Y_forecast_all[fold_idx] = Y_forecast_group[group_idx]
+                    T_forecast_all[fold_idx] = T_forecast_group[group_idx]
 
-        # Map forecast predictions to absolute day indices
-        for fold_idx, fold in enumerate(folds_p):
-            if Y_forecast_all[fold_idx] is None:
-                continue
-            for local_idx, day_idx in enumerate(fold['forecast_day_indices']):
-                forecast_Y_preds[p][day_idx] = Y_forecast_all[fold_idx][local_idx]
-                forecast_T_preds[p][day_idx] = T_forecast_all[fold_idx][local_idx]
+            # Map forecast predictions to absolute day indices
+            for fold_idx, fold in enumerate(folds_p):
+                if Y_forecast_all[fold_idx] is None:
+                    continue
+                for local_idx, day_idx in enumerate(fold['forecast_day_indices']):
+                    forecast_Y_preds[p][day_idx] = Y_forecast_all[fold_idx][local_idx]
+                    forecast_T_preds[p][day_idx] = T_forecast_all[fold_idx][local_idx]
 
-        if verbose:
+        if verbose and not probe:
             p_elapsed = time.time() - p_start_time
             used, total, pct = _get_vram_usage()
             print(f"    p={p}: completed in {p_elapsed:.1f}s, "
@@ -664,6 +720,30 @@ def fit_oraclevarx_tabpfn(
     if verbose:
         used, total, _ = _get_vram_usage()
         print(f"  GPU memory cleared: {used:.1f}/{total:.1f} GB")
+
+    # In probe mode, print summary and return early
+    if probe:
+        print("\nPROBE COMPLETE")
+        header = f"  {'p':>3s}  {'features':>8s}  {'status':>6s}  {'VRAM':>20s}  {'time':>6s}  {'suggested_batch':>15s}"
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for p in range(1, p_max + 1):
+            if p not in probe_results:
+                print(f"  {p:>3d}  {'?':>8s}  {'SKIP':>6s}")
+                continue
+            pr = probe_results[p]
+            n_feat = pr['controls_features']
+            status = pr['status']
+            if status == 'PASS':
+                vram_str = f"{pr['vram_used']:.1f}/{pr['vram_total']:.1f} GB ({pr['vram_pct']:.0f}%)"
+                time_str = f"{pr['time']:.1f}s"
+                bs_str = str(pr['suggested_batch_size'])
+            else:
+                vram_str = "N/A"
+                time_str = "N/A"
+                bs_str = "N/A"
+            print(f"  {p:>3d}  {n_feat:>8d}  {status:>6s}  {vram_str:>20s}  {time_str:>6s}  {bs_str:>15s}")
+        return None
 
     # =========================================================================
     # Phase 4: Batched OLS for all days and all lags

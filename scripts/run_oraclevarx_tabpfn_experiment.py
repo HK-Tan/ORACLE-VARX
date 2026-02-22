@@ -100,6 +100,7 @@ def main(
     experiment_name: str = None,
     show_plots: bool = True,
     verbose: bool = False,
+    probe: bool = False,
 ):
     """Run ORACLE-VARX experiment with TabPFN.
 
@@ -136,6 +137,10 @@ def main(
     # Default alpha grid
     if alpha_grid is None:
         alpha_grid = [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+    # Force verbose in probe mode
+    if probe:
+        verbose = True
 
     print("=" * 80)
     print("ORACLE-VARX EXPERIMENT (TabPFN)")
@@ -220,8 +225,13 @@ def main(
         n_estimators=8,
         device='cuda',
         verbose=verbose,
+        probe=probe,
     )
     elapsed = time.perf_counter() - start_time
+
+    if probe:
+        print(f"\nProbe complete ({elapsed:.1f}s). No results to save.")
+        return None, None, None
 
     print(f"\n  Results:")
     print(f"    Method: {result.method}")
@@ -413,6 +423,9 @@ Example:
     parser.add_argument("--name", type=str, default=None, help="Experiment name")
     parser.add_argument("--no-show", action="store_true", help="Don't display plots")
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress")
+    parser.add_argument("--probe", action="store_true",
+                        help="Probe mode: run 1 fold per p with batch_size=1 to test VRAM usage. "
+                             "No results are saved.")
 
     args = parser.parse_args()
 
@@ -436,4 +449,5 @@ Example:
         experiment_name=args.name,
         show_plots=not args.no_show,
         verbose=args.verbose,
+        probe=args.probe,
     )
