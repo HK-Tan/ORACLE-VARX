@@ -353,6 +353,8 @@ def load_confounder(
     if log_returns:
         import numpy as np
         series = np.log(series / series.shift(1))
+        # Replace inf/-inf (from zero-crossings, e.g. T5YIE in 2008-09) with 0.0
+        series = series.replace([np.inf, -np.inf], 0.0)
         # Backfill the first NaN from the shift (single value, no signal)
         series = series.bfill()
 
