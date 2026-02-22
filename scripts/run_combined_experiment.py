@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
-"""Combined experiment runner with amortized DML first stage.
+"""Combined experiment runner.
 
-This script runs up to 4 methods for a given (confounder_config, learner) pair:
-  1. VARX (OLS) — confounders as endogenous log returns
-  2. ACLE-VARX (OLS) — significance-based p-selection on VARX
-  3. OR-VARX (DML) — p-selection via validation RMSE
-  4. ORACLE-VARX (DML) — significance-based p-selection + alpha-grid
+Three modes of operation:
 
+  1. --no-confounders: VAR + ACLE-VAR baseline (OLS, no confounders)
+  2. --confounders <preset> --ols-only: VARX + ACLE-VARX (OLS with confounders)
+  3. --confounders <preset> --learner <learner>: OR-VARX + ORACLE-VARX (DML)
+
+Modes 1-2 are used by Phase 0 of the orchestrator. Mode 3 is used by Phases 1-3.
 OR-VARX and ORACLE-VARX share the same expensive DML first stage
 (fit_orvarx_core), so this script runs it once and reuses the results.
 
-VARX/ACLE-VARX are skipped if results already exist for this confounder config
-(since they're identical across learners — OLS has no learner dependency).
-
 Usage:
-    # Run all methods for VIX confounders with lgbm learner
+    # Phase 0: OLS baselines
+    python scripts/run_combined_experiment.py --no-confounders --no-show
+    python scripts/run_combined_experiment.py --confounders vix --ols-only --no-show
+
+    # Phases 1-3: DML methods
     python scripts/run_combined_experiment.py --confounders vix --learner lgbm --no-show
 
-    # Run VAR + ACLE-VAR baseline (no confounders)
-    python scripts/run_combined_experiment.py --no-confounders --no-show
-
-    # Quick smoke test with limited data
+    # Quick smoke test
     python scripts/run_combined_experiment.py --confounders vix --learner lgbm --n-days 1500 --no-show
 """
 
@@ -63,19 +62,6 @@ def resolve_confounders(confounders_arg: str) -> list[str]:
         return CONFOUNDER_PRESETS[confounders_arg]
     return [s.strip() for s in confounders_arg.split(",")]
 
-
-def results_exist(output_dir: Path, method: str, conf_label: str) -> bool:
-    """Check if results already exist for this method/confounder combo."""
-    pattern = f"{method}_{conf_label}_*"
-    method_dir = output_dir / method
-    if not method_dir.exists():
-        return False
-    matches = list(method_dir.glob(pattern))
-    # Check if any match has a results.pt file
-    for match in matches:
-        if (match / "results.pt").exists():
-            return True
-    return False
 
 
 def compute_default_n_jobs() -> int:
@@ -208,7 +194,6 @@ def main(
     show_plots: bool = True,
     verbose: bool = False,
     ols_only: bool = False,
-    dml_only: bool = False,
 ):
     """Run combined experiment for a given (confounder_config, learner) pair.
 
@@ -311,85 +296,62 @@ def main(
 
         run_backtest_and_save(
             acle_result_full, Y, dates, loaded_tickers,
-            "aclev", conf_label, learner_label, output_dir, show_plots,
+            "aclevar", conf_label, learner_label, output_dir, show_plots,
         )
 
     else:
         # =================================================================
-        # CONFOUNDERS MODE: VARX + ACLE-VARX + OR-VARX + ORACLE-VARX
+        # CONFOUNDERS MODE
         # =================================================================
         conf_label = confounders
         confounder_names = resolve_confounders(confounders)
         learner_label = learner_name
 
-        print("=" * 80)
-        print(f"COMBINED EXPERIMENT: {conf_label} / {learner_name}")
-        print(f"  Confounders: {confounder_names}")
-        print("=" * 80)
+        if ols_only:
+            # =============================================================
+            # OLS-ONLY: VARX + ACLE-VARX (Phase 0)
+            # =============================================================
+            print("=" * 80)
+            print(f"OLS EXPERIMENT: {conf_label} (VARX + ACLE-VARX)")
+            print(f"  Confounders: {confounder_names}")
+            print("=" * 80)
 
-        # =============================================================
-        # Load data for both paths
-        # =============================================================
-        print("\n" + "-" * 40)
-        print("Loading Data")
-        print("-" * 40)
+            # Load endogenous data (ETF returns + confounders as log returns)
+            print("\n" + "-" * 40)
+            print("Loading Data")
+            print("-" * 40)
 
-        # Path 1: Endogenous data for VARX/ACLE-VARX
-        # (ETF returns + confounders as log returns in VAR system)
-        endo_df = load_opcl_with_confounders(
-            confounder_names=confounder_names,
-            etf_tickers=ETFS,
-            n_days=n_days,
-        )
+            endo_df = load_opcl_with_confounders(
+                confounder_names=confounder_names,
+                etf_tickers=ETFS,
+                n_days=n_days,
+            )
 
-        # Also load SPY for benchmark
-        spy_df = load_opcl_data(tickers=["SPY"], n_days=n_days + 1 if n_days else None)
-        common_dates_endo = endo_df.index.intersection(spy_df.index)
-        endo_df = endo_df.loc[common_dates_endo]
-        spy_df_endo = spy_df.loc[common_dates_endo]
+            spy_df = load_opcl_data(tickers=["SPY"], n_days=n_days + 1 if n_days else None)
+            common_dates_endo = endo_df.index.intersection(spy_df.index)
+            endo_df = endo_df.loc[common_dates_endo]
+            spy_df_endo = spy_df.loc[common_dates_endo]
 
-        endo_combined = endo_df.copy()
-        endo_combined["SPY"] = spy_df_endo["SPY"]
+            endo_combined = endo_df.copy()
+            endo_combined["SPY"] = spy_df_endo["SPY"]
 
-        endo_dates = endo_combined.index.strftime("%Y-%m-%d").tolist()
-        endo_all_tickers = endo_combined.columns.tolist()
-        endo_model_tickers = [t for t in endo_all_tickers if t != "SPY"]
+            endo_dates = endo_combined.index.strftime("%Y-%m-%d").tolist()
+            endo_all_tickers = endo_combined.columns.tolist()
+            endo_model_tickers = [t for t in endo_all_tickers if t != "SPY"]
 
-        print(f"  Endogenous path: {len(endo_dates)} days, {len(endo_model_tickers)} variables")
-        print(f"    Model variables: {endo_model_tickers}")
-
-        # Path 2: Exogenous data for DML methods (OR-VARX/ORACLE-VARX)
-        tickers_dml = ETFS + ["SPY"]
-        Y_dml, W_dml, dml_dates, dml_tickers = prepare_tensors(
-            tickers=tickers_dml,
-            confounder_names=confounder_names,
-            n_days=n_days,
-            device=device,
-        )
-
-        spy_idx_dml = dml_tickers.index("SPY")
-        Y_dml_etf = torch.cat([Y_dml[:, :spy_idx_dml], Y_dml[:, spy_idx_dml + 1:]], dim=1)
-        etf_tickers_dml = [t for t in dml_tickers if t != "SPY"]
-
-        print(f"  DML path: {len(dml_dates)} days, Y={Y_dml_etf.shape}, W={W_dml.shape}")
-
-        # =============================================================
-        # Method 1: VARX (OLS) — skip if results exist or --dml-only
-        # =============================================================
-        if dml_only:
-            print("\n  --dml-only: skipping VARX (OLS)")
-        elif results_exist(output_dir, "varx", conf_label):
-            print(f"\n  VARX results for '{conf_label}' already exist, skipping...")
-        else:
-            print("\n" + "=" * 60)
-            print("  METHOD 1/4: VARX (OLS)")
-            print("=" * 60)
+            print(f"  Data: {len(endo_dates)} days, {len(endo_model_tickers)} variables")
+            print(f"    Model variables: {endo_model_tickers}")
 
             Y_endo = torch.from_numpy(endo_combined.values.astype("float32")).to(device)
             spy_idx_endo = endo_all_tickers.index("SPY")
             Y_endo_model = torch.cat([Y_endo[:, :spy_idx_endo], Y_endo[:, spy_idx_endo + 1:]], dim=1)
-
             lookback_var = config.lookback_var
+
+            # --- VARX ---
+            print("\n" + "=" * 60)
+            print("  METHOD 1/2: VARX (OLS)")
+            print("=" * 60)
+
             varx_start = time.perf_counter()
             varx_result_full = fit_var(
                 Y=Y_endo_model,
@@ -401,7 +363,6 @@ def main(
             )
             varx_elapsed = time.perf_counter() - varx_start
 
-            # Filter out confounders for backtesting (not tradeable)
             etf_indices = [i for i, t in enumerate(endo_model_tickers) if t in ETFS]
             conf_indices = [i for i, t in enumerate(endo_model_tickers) if t not in ETFS]
             etf_only_tickers = [endo_model_tickers[i] for i in etf_indices]
@@ -424,23 +385,11 @@ def main(
                 "varx", conf_label, "ols", output_dir, show_plots,
             )
 
-        # =============================================================
-        # Method 2: ACLE-VARX (OLS) — skip if results exist or --dml-only
-        # =============================================================
-        if dml_only:
-            print("\n  --dml-only: skipping ACLE-VARX (OLS)")
-        elif results_exist(output_dir, "aclevarx", conf_label):
-            print(f"\n  ACLE-VARX results for '{conf_label}' already exist, skipping...")
-        else:
+            # --- ACLE-VARX ---
             print("\n" + "=" * 60)
-            print("  METHOD 2/4: ACLE-VARX (OLS)")
+            print("  METHOD 2/2: ACLE-VARX (OLS)")
             print("=" * 60)
 
-            Y_endo = torch.from_numpy(endo_combined.values.astype("float32")).to(device)
-            spy_idx_endo = endo_all_tickers.index("SPY")
-            Y_endo_model = torch.cat([Y_endo[:, :spy_idx_endo], Y_endo[:, spy_idx_endo + 1:]], dim=1)
-
-            lookback_var = config.lookback_var
             aclevarx_start = time.perf_counter()
             aclevarx_result_full = fit_aclevarx(
                 Y=Y_endo_model,
@@ -454,7 +403,6 @@ def main(
             )
             aclevarx_elapsed = time.perf_counter() - aclevarx_start
 
-            # Filter out confounders for backtesting
             etf_indices = [i for i, t in enumerate(endo_model_tickers) if t in ETFS]
             conf_indices = [i for i, t in enumerate(endo_model_tickers) if t not in ETFS]
             etf_only_tickers = [endo_model_tickers[i] for i in etf_indices]
@@ -479,13 +427,34 @@ def main(
                 "aclevarx", conf_label, "ols", output_dir, show_plots,
             )
 
-        # =============================================================
-        # Method 3 + 4: OR-VARX + ORACLE-VARX (shared DML first stage)
-        # — skip if --ols-only
-        # =============================================================
-        if ols_only:
-            print("\n  --ols-only: skipping DML methods (OR-VARX, ORACLE-VARX)")
         else:
+            # =============================================================
+            # DML: OR-VARX + ORACLE-VARX (Phases 1-3)
+            # =============================================================
+            print("=" * 80)
+            print(f"DML EXPERIMENT: {conf_label} / {learner_name}")
+            print(f"  Confounders: {confounder_names}")
+            print("=" * 80)
+
+            # Load exogenous data for DML methods
+            print("\n" + "-" * 40)
+            print("Loading Data")
+            print("-" * 40)
+
+            tickers_dml = ETFS + ["SPY"]
+            Y_dml, W_dml, dml_dates, dml_tickers = prepare_tensors(
+                tickers=tickers_dml,
+                confounder_names=confounder_names,
+                n_days=n_days,
+                device=device,
+            )
+
+            spy_idx_dml = dml_tickers.index("SPY")
+            Y_dml_etf = torch.cat([Y_dml[:, :spy_idx_dml], Y_dml[:, spy_idx_dml + 1:]], dim=1)
+            etf_tickers_dml = [t for t in dml_tickers if t != "SPY"]
+
+            print(f"  Data: {len(dml_dates)} days, Y={Y_dml_etf.shape}, W={W_dml.shape}")
+
             print("\n" + "=" * 60)
             print(f"  DML FIRST STAGE (shared by OR-VARX + ORACLE-VARX)")
             print(f"  Learner: {learner_name}, n_jobs: {n_jobs}")
@@ -509,7 +478,7 @@ def main(
 
             # --- OR-VARX ---
             print("\n" + "=" * 60)
-            print("  METHOD 3/4: OR-VARX (second stage)")
+            print("  METHOD 1/2: OR-VARX")
             print("=" * 60)
 
             orvarx_start = time.perf_counter()
@@ -537,7 +506,7 @@ def main(
 
             # --- ORACLE-VARX ---
             print("\n" + "=" * 60)
-            print("  METHOD 4/4: ORACLE-VARX (second stage)")
+            print("  METHOD 2/2: ORACLE-VARX")
             print("=" * 60)
 
             oraclevarx_start = time.perf_counter()
@@ -615,16 +584,8 @@ Examples:
                         help="Print detailed progress")
     parser.add_argument("--ols-only", action="store_true",
                         help="In confounders mode, run only VARX + ACLE-VARX (skip DML). No effect with --no-confounders.")
-    parser.add_argument("--dml-only", action="store_true",
-                        help="In confounders mode, skip VARX + ACLE-VARX (run only DML methods). Cannot combine with --no-confounders.")
 
     args = parser.parse_args()
-
-    # Validate flag combinations
-    if args.ols_only and args.dml_only:
-        parser.error("--ols-only and --dml-only are mutually exclusive")
-    if args.dml_only and args.no_confounders:
-        parser.error("--dml-only cannot be used with --no-confounders (no DML methods in no-confounders mode)")
 
     # Parse alpha grid if provided
     alpha_grid = None
@@ -645,5 +606,4 @@ Examples:
         show_plots=not args.no_show,
         verbose=args.verbose,
         ols_only=args.ols_only,
-        dml_only=args.dml_only,
     )

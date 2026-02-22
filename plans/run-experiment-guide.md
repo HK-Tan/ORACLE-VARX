@@ -51,7 +51,7 @@ The orchestrator (`run_all_experiments.py`) organizes work into 4 CPU phases plu
 | **Phase 3** | all10 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **TabPFN** | 3 confounder presets (run manually) | ORACLE-VARX-TabPFN x3 | **GPU** |
 
-Phase 0 runs all OLS methods sequentially with full CPU access. Phases 1-3 run only DML methods (`--dml-only`), evenly distributed across 4 tmux panes.
+Phase 0 runs all OLS methods sequentially with full CPU access (`--ols-only` for confounder presets). Phases 1-3 run DML methods only — `run_combined_experiment.py` without `--ols-only` goes directly to the DML branch.
 
 ## 4. Prerequisites
 
@@ -202,7 +202,6 @@ Runs up to 4 methods for a single (confounder preset, learner) pair with amortiz
 | `--no-show` | flag | — | Don't display plots (use on headless servers) |
 | `--verbose` | flag | — | Print detailed progress |
 | `--ols-only` | flag | — | In confounders mode, run only VARX + ACLE-VARX (skip DML). No effect with `--no-confounders`. |
-| `--dml-only` | flag | — | In confounders mode, skip VARX + ACLE-VARX (run only DML methods). Cannot combine with `--no-confounders`. |
 
 ### `run_all_experiments.py`
 
