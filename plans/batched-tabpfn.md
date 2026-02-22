@@ -73,19 +73,14 @@ Typical memory usage:
 
 ## Adaptive Batch Size
 
-For higher lag orders (p), the number of treatments increases (n_assets × p), consuming more VRAM. To maintain ~6GB VRAM usage (~75% on 8GB GPU), batch size scales inversely with p:
+For higher lag orders (p), the number of features increases, consuming more VRAM. Batch size scales with a size-based heuristic that also accounts for the number of confounders:
 
 ```python
-effective_batch_size = max(5, base_batch_size // p)
+confounder_scale = 10.0 / (9 + n_confounders)
+batch_size = int(confounder_scale * 6 * VRAM_GB / (p ** 1.5))
 ```
 
-| p | batch_size (base=50) | Expected VRAM |
-|---|---------------------|---------------|
-| 1 | 50 | ~6 GB |
-| 2 | 25 | ~6 GB |
-| 3 | 16 | ~6 GB |
-| 5 | 10 | ~6 GB |
-| 10 | 5 | ~6 GB |
+See `plans/vram-considerations-tabpfn.md` for detailed tables and tuning guidance.
 
 ## VRAM Monitoring
 
@@ -101,7 +96,7 @@ With `verbose=True`, the model logs VRAM usage before and after each p value:
 
 Helper functions in `src/models/oracle_var_tabpfn.py`:
 - `_get_vram_usage()` - Returns (used_gb, total_gb, percent_used)
-- `_compute_adaptive_batch_size(base_batch_size, p)` - Scales batch size for VRAM control
+- `_get_batch_size_for_p(p, n_folds, n_confounders)` - Scales batch size for VRAM control
 
 ## Integration with ORACLE-VARX
 
@@ -147,3 +142,51 @@ Where:
 - `θ` are the deconfounded coefficients from second-stage OLS
 
 This eliminates the residual proxy approximation previously used in Phase 5.
+
+## Probe Mode (`--probe`)
+
+When using more confounders (macro5: 5, all10: 10), the feature count per p grows
+as `(9 + n_confounders) * p`, which can cause OOM on GPUs with limited VRAM.
+
+The `--probe` flag runs 1 fold per p with `batch_size=1` to empirically test VRAM
+usage before committing to a full run. No results are saved.
+
+### Batch Size Scaling for Confounders
+
+`_get_batch_size_for_p()` accounts for confounder count with:
+
+```
+batch_size = int(10 / (9 + n_confounders) * 6 * VRAM_GB / p^1.5)
+```
+
+Scaling factors: VIX (1 confounder) = 1.0x, macro5 (5) = 0.71x, all10 (10) = 0.53x.
+
+### Usage
+
+```bash
+# Probe macro5
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --probe
+
+# Probe all10 with less data for faster testing
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --probe --n-days 1500
+```
+
+### Expected Output
+
+```
+*** PROBE MODE: Testing 1 fold per p (p=1..10) ***
+*** n_confounders=5, total features per p: (9+5)*p ***
+
+  p=1: PROBE mode, batch_size forced to 1
+    PROBE p=1: PASS
+      Controls features: 5 (5 confounders x 1 lags)
+      VRAM after inference: 12.3/80.0 GB (15.4%)
+      Time for 1 fold: 2.3s
+  ...
+
+PROBE COMPLETE
+    p  features  status                  VRAM    time  suggested_batch
+  ------------------------------------------------------------------
+    1         5    PASS  12.3/80.0 GB (15%)    2.3s               96
+   10        50    PASS  28.9/80.0 GB (36%)    8.7s                3
+```
