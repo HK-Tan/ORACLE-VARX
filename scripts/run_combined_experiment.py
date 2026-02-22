@@ -207,6 +207,8 @@ def main(
     output_dir: str = "results",
     show_plots: bool = True,
     verbose: bool = False,
+    ols_only: bool = False,
+    dml_only: bool = False,
 ):
     """Run combined experiment for a given (confounder_config, learner) pair.
 
@@ -372,9 +374,11 @@ def main(
         print(f"  DML path: {len(dml_dates)} days, Y={Y_dml_etf.shape}, W={W_dml.shape}")
 
         # =============================================================
-        # Method 1: VARX (OLS) — skip if results exist
+        # Method 1: VARX (OLS) — skip if results exist or --dml-only
         # =============================================================
-        if results_exist(output_dir, "varx", conf_label):
+        if dml_only:
+            print("\n  --dml-only: skipping VARX (OLS)")
+        elif results_exist(output_dir, "varx", conf_label):
             print(f"\n  VARX results for '{conf_label}' already exist, skipping...")
         else:
             print("\n" + "=" * 60)
@@ -421,9 +425,11 @@ def main(
             )
 
         # =============================================================
-        # Method 2: ACLE-VARX (OLS) — skip if results exist
+        # Method 2: ACLE-VARX (OLS) — skip if results exist or --dml-only
         # =============================================================
-        if results_exist(output_dir, "aclevarx", conf_label):
+        if dml_only:
+            print("\n  --dml-only: skipping ACLE-VARX (OLS)")
+        elif results_exist(output_dir, "aclevarx", conf_label):
             print(f"\n  ACLE-VARX results for '{conf_label}' already exist, skipping...")
         else:
             print("\n" + "=" * 60)
@@ -475,84 +481,88 @@ def main(
 
         # =============================================================
         # Method 3 + 4: OR-VARX + ORACLE-VARX (shared DML first stage)
+        # — skip if --ols-only
         # =============================================================
-        print("\n" + "=" * 60)
-        print(f"  DML FIRST STAGE (shared by OR-VARX + ORACLE-VARX)")
-        print(f"  Learner: {learner_name}, n_jobs: {n_jobs}")
-        print("=" * 60)
+        if ols_only:
+            print("\n  --ols-only: skipping DML methods (OR-VARX, ORACLE-VARX)")
+        else:
+            print("\n" + "=" * 60)
+            print(f"  DML FIRST STAGE (shared by OR-VARX + ORACLE-VARX)")
+            print(f"  Learner: {learner_name}, n_jobs: {n_jobs}")
+            print("=" * 60)
 
-        lookback_orvarx = config.lookback_orvarx
-        n_output_dates = len(dml_dates) - lookback_orvarx - validation_days
+            lookback_orvarx = config.lookback_orvarx
+            n_output_dates = len(dml_dates) - lookback_orvarx - validation_days
 
-        core_start = time.perf_counter()
-        core_results = fit_orvarx_core(
-            Y=Y_dml_etf,
-            W=W_dml,
-            p_max=p_max,
-            config=config,
-            learner_name=learner_name,
-            n_jobs=n_jobs,
-            verbose=verbose,
-        )
-        core_elapsed = time.perf_counter() - core_start
-        print(f"  DML first stage complete: {core_elapsed:.1f}s ({core_elapsed/60:.1f} min)")
+            core_start = time.perf_counter()
+            core_results = fit_orvarx_core(
+                Y=Y_dml_etf,
+                W=W_dml,
+                p_max=p_max,
+                config=config,
+                learner_name=learner_name,
+                n_jobs=n_jobs,
+                verbose=verbose,
+            )
+            core_elapsed = time.perf_counter() - core_start
+            print(f"  DML first stage complete: {core_elapsed:.1f}s ({core_elapsed/60:.1f} min)")
 
-        # --- OR-VARX ---
-        print("\n" + "=" * 60)
-        print("  METHOD 3/4: OR-VARX (second stage)")
-        print("=" * 60)
+            # --- OR-VARX ---
+            print("\n" + "=" * 60)
+            print("  METHOD 3/4: OR-VARX (second stage)")
+            print("=" * 60)
 
-        orvarx_start = time.perf_counter()
-        orvarx_result = fit_orvarx_batched(
-            Y=Y_dml_etf,
-            W=W_dml,
-            p_max=p_max,
-            config=config,
-            validation_days=validation_days,
-            asset_names=etf_tickers_dml,
-            confounder_names=confounder_names,
-            dates=dml_dates[lookback_orvarx + validation_days:],
-            learner_name=learner_name,
-            n_jobs=n_jobs,
-            verbose=verbose,
-            core_results=core_results,
-        )
-        orvarx_elapsed = time.perf_counter() - orvarx_start
-        print(f"  OR-VARX complete: {orvarx_result.forecasts.shape[1]} output days, {orvarx_elapsed:.1f}s")
+            orvarx_start = time.perf_counter()
+            orvarx_result = fit_orvarx_batched(
+                Y=Y_dml_etf,
+                W=W_dml,
+                p_max=p_max,
+                config=config,
+                validation_days=validation_days,
+                asset_names=etf_tickers_dml,
+                confounder_names=confounder_names,
+                dates=dml_dates[lookback_orvarx + validation_days:],
+                learner_name=learner_name,
+                n_jobs=n_jobs,
+                verbose=verbose,
+                core_results=core_results,
+            )
+            orvarx_elapsed = time.perf_counter() - orvarx_start
+            print(f"  OR-VARX complete: {orvarx_result.forecasts.shape[1]} output days, {orvarx_elapsed:.1f}s")
 
-        run_backtest_and_save(
-            orvarx_result, Y_dml, dml_dates, dml_tickers,
-            "orvarx", conf_label, learner_label, output_dir, show_plots,
-        )
+            run_backtest_and_save(
+                orvarx_result, Y_dml, dml_dates, dml_tickers,
+                "orvarx", conf_label, learner_label, output_dir, show_plots,
+            )
 
-        # --- ORACLE-VARX ---
-        print("\n" + "=" * 60)
-        print("  METHOD 4/4: ORACLE-VARX (second stage)")
-        print("=" * 60)
+            # --- ORACLE-VARX ---
+            print("\n" + "=" * 60)
+            print("  METHOD 4/4: ORACLE-VARX (second stage)")
+            print("=" * 60)
 
-        oraclevarx_start = time.perf_counter()
-        oraclevarx_result = fit_oraclevarx_batched(
-            Y=Y_dml_etf,
-            W=W_dml,
-            alpha_grid=alpha_grid,
-            p_max=p_max,
-            config=config,
-            validation_days=validation_days,
-            asset_names=etf_tickers_dml,
-            confounder_names=confounder_names,
-            dates=dml_dates[lookback_orvarx + validation_days:],
-            learner_name=learner_name,
-            n_jobs=n_jobs,
-            verbose=verbose,
-            core_results=core_results,
-        )
-        oraclevarx_elapsed = time.perf_counter() - oraclevarx_start
-        print(f"  ORACLE-VARX complete: {oraclevarx_result.forecasts.shape[1]} output days, {oraclevarx_elapsed:.1f}s")
+            oraclevarx_start = time.perf_counter()
+            oraclevarx_result = fit_oraclevarx_batched(
+                Y=Y_dml_etf,
+                W=W_dml,
+                alpha_grid=alpha_grid,
+                p_max=p_max,
+                config=config,
+                validation_days=validation_days,
+                asset_names=etf_tickers_dml,
+                confounder_names=confounder_names,
+                dates=dml_dates[lookback_orvarx + validation_days:],
+                learner_name=learner_name,
+                n_jobs=n_jobs,
+                verbose=verbose,
+                core_results=core_results,
+            )
+            oraclevarx_elapsed = time.perf_counter() - oraclevarx_start
+            print(f"  ORACLE-VARX complete: {oraclevarx_result.forecasts.shape[1]} output days, {oraclevarx_elapsed:.1f}s")
 
-        run_backtest_and_save(
-            oraclevarx_result, Y_dml, dml_dates, dml_tickers,
-            "oraclevarx", conf_label, learner_label, output_dir, show_plots,
-        )
+            run_backtest_and_save(
+                oraclevarx_result, Y_dml, dml_dates, dml_tickers,
+                "oraclevarx", conf_label, learner_label, output_dir, show_plots,
+            )
 
     total_elapsed = time.perf_counter() - total_start
     print("\n" + "=" * 80)
@@ -603,8 +613,18 @@ Examples:
                         help="Don't display plots")
     parser.add_argument("--verbose", action="store_true",
                         help="Print detailed progress")
+    parser.add_argument("--ols-only", action="store_true",
+                        help="In confounders mode, run only VARX + ACLE-VARX (skip DML). No effect with --no-confounders.")
+    parser.add_argument("--dml-only", action="store_true",
+                        help="In confounders mode, skip VARX + ACLE-VARX (run only DML methods). Cannot combine with --no-confounders.")
 
     args = parser.parse_args()
+
+    # Validate flag combinations
+    if args.ols_only and args.dml_only:
+        parser.error("--ols-only and --dml-only are mutually exclusive")
+    if args.dml_only and args.no_confounders:
+        parser.error("--dml-only cannot be used with --no-confounders (no DML methods in no-confounders mode)")
 
     # Parse alpha grid if provided
     alpha_grid = None
@@ -624,4 +644,6 @@ Examples:
         output_dir=args.output_dir,
         show_plots=not args.no_show,
         verbose=args.verbose,
+        ols_only=args.ols_only,
+        dml_only=args.dml_only,
     )
