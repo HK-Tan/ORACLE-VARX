@@ -54,8 +54,17 @@ from src.evaluation.backtest import save_experiment_results
 from src.evaluation.plotting import print_performance_summary
 
 
+def resolve_confounders(confounders_arg: str) -> list[str]:
+    """Resolve confounder argument to list of names."""
+    from src.data.constants import CONFOUNDER_PRESETS
+    if confounders_arg in CONFOUNDER_PRESETS:
+        return CONFOUNDER_PRESETS[confounders_arg]
+    return [s.strip() for s in confounders_arg.split(",")]
+
+
 def main(
     n_days: int = None,
+    confounders: str = "vix",
     validation_days: int = 21,
     p_max: int = 10,
     alpha_grid: list = None,
@@ -90,6 +99,9 @@ def main(
     print("ORACLE-VARX EXPERIMENT")
     print("=" * 80)
 
+    confounder_names = resolve_confounders(confounders)
+    conf_label = confounders
+
     # Create output directory
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +109,7 @@ def main(
     # Generate experiment name if not provided
     if experiment_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_name = f"oraclevarx_{learner_name}_{timestamp}"
+        experiment_name = f"oraclevarx_{conf_label}_{learner_name}_{timestamp}"
 
     print(f"\nExperiment: {experiment_name}")
     print(f"Output directory: {output_dir}")
@@ -116,7 +128,7 @@ def main(
 
     Y, W, dates, loaded_tickers = prepare_tensors(
         tickers=tickers,
-        confounder_names=["VIX"],
+        confounder_names=confounder_names,
         n_days=n_days,
         device=device,
     )
@@ -130,7 +142,7 @@ def main(
     print(f"  Date range: {dates[0]} to {dates[-1]}")
     print(f"  Assets: {etf_tickers}")
     print(f"  Y shape: {Y_etf.shape}")
-    print(f"  W shape (VIX): {W.shape}")
+    print(f"  W shape ({conf_label}): {W.shape}")
 
     # =========================================================================
     # Step 2: Run ORACLE-VARX Model
@@ -161,7 +173,7 @@ def main(
         config=config,
         validation_days=validation_days,
         asset_names=etf_tickers,
-        confounder_names=["VIX"],
+        confounder_names=confounder_names,
         dates=dates[lookback + validation_days:],  # Offset dates for output period (after validation)
         learner_name=learner_name,
         n_jobs=n_jobs,
@@ -251,7 +263,7 @@ def main(
     plot_lag_analysis(
         p_optimal=result.p_optimal.cpu().numpy(),
         dates=pd.to_datetime(result.dates),
-        title=f"ORACLE-VARX ({learner_name}): Optimal Lag (p) Over Time\np_max={p_max}, validation={validation_days} days",
+        title=f"ORACLE-VARX ({conf_label}/{learner_name}): Optimal Lag (p) Over Time\np_max={p_max}, validation={validation_days} days",
         save_path=str(lag_plot_path),
         show_plot=show_plots,
     )
@@ -262,7 +274,7 @@ def main(
     plot_strategy_comparison(
         pnl_results=pnl_results,
         market_adjusted=True,
-        title=f"ORACLE-VARX ({learner_name}): Market-Adjusted Strategy Comparison\n{result.dates[0]} to {result.dates[-1]}",
+        title=f"ORACLE-VARX ({conf_label}/{learner_name}): Market-Adjusted Strategy Comparison\n{result.dates[0]} to {result.dates[-1]}",
         save_path=str(strategy_plot_path),
         show_plot=show_plots,
     )
@@ -274,7 +286,7 @@ def main(
         pnl_results=pnl_results_raw,
         include_spy=True,
         market_adjusted=False,
-        title=f"ORACLE-VARX ({learner_name}): Strategy Comparison vs SPY\n{result.dates[0]} to {result.dates[-1]}",
+        title=f"ORACLE-VARX ({conf_label}/{learner_name}): Strategy Comparison vs SPY\n{result.dates[0]} to {result.dates[-1]}",
         save_path=str(strategy_plot_raw_path),
         show_plot=show_plots,
     )
@@ -296,7 +308,7 @@ def main(
         save_path = experiment_dir / f"coefficient_evolution_{label}.png"
         plot_coefficient_evolution_per_p(
             per_p_coefs,
-            title=f"ORACLE-VARX ({learner_name}): Coefficient Evolution p*={p_star} ({date_str})",
+            title=f"ORACLE-VARX ({conf_label}/{learner_name}): Coefficient Evolution p*={p_star} ({date_str})",
             save_path=str(save_path), show_plot=show_plots,
         )
         print(f"  Saved: {save_path}")
@@ -336,6 +348,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run ORACLE-VARX experiment on ETF returns")
     parser.add_argument("--n-days", type=int, default=None, help="Number of days to load (default: all)")
+    parser.add_argument("--confounders", type=str, default="vix",
+                        help="Confounder config: preset name (vix/macro5/all10) or comma-separated names (default: vix)")
     parser.add_argument("--validation-days", type=int, default=21, help="Validation period (default: 21)")
     parser.add_argument("--p-max", type=int, default=10, help="Maximum lag order (default: 10)")
     parser.add_argument("--alpha-grid", type=str, default=None,
@@ -358,6 +372,7 @@ if __name__ == "__main__":
 
     main(
         n_days=args.n_days,
+        confounders=args.confounders,
         validation_days=args.validation_days,
         p_max=args.p_max,
         alpha_grid=alpha_grid,

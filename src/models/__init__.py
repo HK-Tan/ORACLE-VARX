@@ -23,7 +23,7 @@ from src.models.var_pytorch import (
 
 from src.models.dml_pytorch import (
     fit_orvarx_batched,
-    _fit_orvarx_core,
+    fit_orvarx_core,
     estimate_theta,
     compute_se_oracle,
     # Grid-based functions
@@ -46,7 +46,7 @@ __all__ = [
     'select_optimal_p',
     # DML / OR-VARX functions
     'fit_orvarx_batched',
-    '_fit_orvarx_core',
+    'fit_orvarx_core',
     'estimate_theta',
     'compute_se_oracle',
     # ORACLE-VARX functions

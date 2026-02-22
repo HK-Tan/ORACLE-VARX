@@ -49,18 +49,36 @@ CONFOUNDER_FILES: Dict[str, Path] = {
     "T5YIE": DATA_DIR / "T5YIE_20030102_20201231.csv",
     "DCOILWTICO": DATA_DIR / "DCOILWTICO_20000103_20201231.csv",
     "USEPUINDXD": DATA_DIR / "USEPUINDXD_20000103_20201231.csv",
+    "BAMLC0A4CBBB": DATA_DIR / "BAMLC0A4CBBB_20000103_20201231.csv",
+    "DFII10": DATA_DIR / "DFII10_20030102_20201231.csv",
+    "DTWEXBGS": DATA_DIR / "DTWEXBGS_20060102_20201231.csv",
+    "DTWEXEMEGS": DATA_DIR / "DTWEXEMEGS_20060102_20201231.csv",
+    "GVZCLS": DATA_DIR / "GVZCLS_20080603_20201231.csv",
 }
-"""Confounder/macro variable files for potential future use."""
+"""Confounder/macro variable data files."""
+
+CONFOUNDER_PRESETS: Dict[str, list[str]] = {
+    "vix": ["VIX"],
+    "macro5": ["VIX", "DFF", "T5YIE", "DCOILWTICO", "USEPUINDXD"],
+    "all10": [
+        "VIX", "DFF", "T5YIE", "DCOILWTICO", "USEPUINDXD",
+        "BAMLC0A4CBBB", "DFII10", "DTWEXBGS", "DTWEXEMEGS", "GVZCLS",
+    ],
+}
+"""Preset confounder configurations for experiments.
+
+- vix: VIX only (data from 2000, ~17 years eval)
+- macro5: 5 key macro variables (data from 2003, ~14 years eval)
+- all10: All 10 confounders (data from mid-2008, ~8 years eval)
+"""
 
 # ============================================================================
 # Time Series Parameters
 # ============================================================================
 
+# Legacy constants (unused — scripts use GridConfig's lookback_var=514/lookback_orvarx=1018)
 DEFAULT_LOOKBACK_DAYS: int = 756
-"""Default lookback window in days (approximately 3 years of trading days)."""
-
 DEFAULT_VALIDATION_DAYS: int = 20
-"""Default validation period in days (approximately 1 month of trading days)."""
 
 DEFAULT_P_MAX: int = 10
 """Maximum lag order for VAR (Vector Autoregression) model."""
@@ -72,8 +90,6 @@ DEFAULT_ALPHA_GRID: list[float] = [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
 # Testing & Evaluation Parameters
 # ============================================================================
 
+# Legacy constants (unused — test period determined dynamically by data length)
 TEST_DAYS: int = 876
-"""Initial test period in days for preliminary model evaluation."""
-
 TEST_FORECAST_DAYS: int = TEST_DAYS - DEFAULT_LOOKBACK_DAYS
-"""Number of forecast days in test period (876 - 756 = 120 days)."""
