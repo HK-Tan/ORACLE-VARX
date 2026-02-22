@@ -148,8 +148,10 @@ This eliminates the residual proxy approximation previously used in Phase 5.
 When using more confounders (macro5: 5, all10: 10), the feature count per p grows
 as `(9 + n_confounders) * p`, which can cause OOM on GPUs with limited VRAM.
 
-The `--probe` flag runs 1 fold per p with `batch_size=1` to empirically test VRAM
-usage before committing to a full run. No results are saved.
+The `--probe` flag runs 1 iteration per p with the real heuristic batch size to
+empirically test VRAM usage before committing to a full run. No results are saved.
+Probe shares the exact same grouped code path as non-probe (including
+`folds_by_test_size` grouping and `fit_predict_batch` sub-batching).
 
 ### Batch Size Scaling for Confounders
 
@@ -174,14 +176,14 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --probe -
 ### Expected Output
 
 ```
-*** PROBE MODE: Testing 1 fold per p (p=1..10) ***
+*** PROBE MODE: Testing 1 iteration per p (p=1..10) ***
 *** n_confounders=5, total features per p: (9+5)*p ***
 
-  p=1: PROBE mode, batch_size forced to 1
-    PROBE p=1: PASS
+  p=1: PROBE mode, testing 1 iteration with batch_size=342
+    PROBE p=1: PASS (batch_size=342)
       Controls features: 5 (5 confounders x 1 lags)
       VRAM after inference: 12.3/80.0 GB (15.4%)
-      Time for 1 fold: 2.3s
+      Time: 2.3s
   ...
 
 PROBE COMPLETE

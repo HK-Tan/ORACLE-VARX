@@ -179,8 +179,10 @@ numerator = 7.5 * total_vram_gb  # Use more VRAM
 ## Probe Mode (`--probe`)
 
 When using more confounders, the heuristic formula may not be accurate enough for
-your GPU. The `--probe` flag runs 1 fold per p value with `batch_size=1` to
-empirically test VRAM usage before committing to a full run. No results are saved.
+your GPU. The `--probe` flag runs 1 iteration per p with the real heuristic batch
+size to empirically test VRAM usage before committing to a full run. No results
+are saved. Probe shares the exact same grouped code path as non-probe (including
+`folds_by_test_size` grouping and `fit_predict_batch` sub-batching).
 
 ```bash
 # Probe macro5 on your GPU
@@ -200,5 +202,5 @@ PROBE COMPLETE
    10        50    PASS  28.9/80.0 GB (36%)    8.7s                3
 ```
 
-If any p value OOMs even with `batch_size=1`, the probe reports it and continues
-to the next p.
+If any p value OOMs at the heuristic batch size, the probe reports it and
+continues to the next p.
