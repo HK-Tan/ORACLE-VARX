@@ -245,7 +245,7 @@ def batched_ols(
 
 ## Algorithm: Active Fold Selection
 
-For `day_idx`, we need residuals for rows in the DML window `[day_idx - lookback + p : day_idx]`.
+For `day_idx`, we need residuals for rows in the DML window `[day_idx - lookback + p : day_idx)` (exclusive end).
 
 ```python
 def get_active_folds_for_day(day_idx: int, p: int, config: GridConfig) -> List[int]:
@@ -253,12 +253,12 @@ def get_active_folds_for_day(day_idx: int, p: int, config: GridConfig) -> List[i
 
     # Row range in absolute indices
     row_start_abs = day_idx - config.lookback + p
-    row_end_abs = day_idx
+    row_end_abs = day_idx - 1
 
     # First grid_idx that could cover any row in this range
     first_grid_idx = max(0, (row_start_abs - config.train_size) // config.test_size)
 
-    # Last grid_idx needed (covers up to day_idx)
+    # Last grid_idx needed (covers up to day_idx - 1)
     last_grid_idx = (row_end_abs - config.train_size) // config.test_size
 
     return list(range(first_grid_idx, last_grid_idx + 1))

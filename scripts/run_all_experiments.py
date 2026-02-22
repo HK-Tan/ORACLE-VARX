@@ -50,17 +50,45 @@ CONFOUNDER_CONFIGS = {
 SCRIPT = "python scripts/run_combined_experiment.py"
 
 
+def _get_physical_cores() -> int:
+    """Get physical core count (falls back to os.cpu_count)."""
+    try:
+        return int(subprocess.check_output(
+            ["python", "-c", "import psutil; print(psutil.cpu_count(logical=False))"],
+            text=True,
+        ).strip())
+    except Exception:
+        return os.cpu_count() or 4
+
+
+def _compute_threads_per_pane(n_panes: int) -> int:
+    """Compute per-pane thread/job count for BLAS and joblib."""
+    cores = _get_physical_cores()
+    return max(1, (cores - 1) // n_panes)
+
+
 def get_phase_commands(phase: int, n_jobs: int = None, verbose: bool = True) -> list[str]:
-    """Get the shell commands for a given phase."""
-    n_jobs_arg = f" --n-jobs {n_jobs}" if n_jobs else ""
+    """Get the shell commands for a given phase.
+
+    Each command is prefixed with BLAS/OpenMP thread limits so that
+    parallel panes don't over-subscribe CPU cores.
+    """
     verbose_arg = " --verbose" if verbose else ""
 
     if phase == 0:
+        # Single command — give it all cores
         return [f"{SCRIPT} --no-confounders --no-show{verbose_arg}"]
     elif phase in CONFOUNDER_CONFIGS:
         conf = CONFOUNDER_CONFIGS[phase]
+        n_panes = len(LEARNERS)
+        threads = n_jobs if n_jobs else _compute_threads_per_pane(n_panes)
+        thread_env = (
+            f"OMP_NUM_THREADS={threads} "
+            f"MKL_NUM_THREADS={threads} "
+            f"OPENBLAS_NUM_THREADS={threads}"
+        )
         return [
-            f"{SCRIPT} --confounders {conf} --learner {learner} --no-show{verbose_arg}{n_jobs_arg}"
+            f"{thread_env} {SCRIPT} --confounders {conf} --learner {learner} --no-show{verbose_arg} --n-jobs {threads}"
             for learner in LEARNERS
         ]
     else:
