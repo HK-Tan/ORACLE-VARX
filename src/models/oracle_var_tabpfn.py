@@ -584,6 +584,10 @@ def fit_oraclevarx_tabpfn(
                 # Run batched TabPFN for this group
                 Y_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_tests_group, effective_batch_size)
 
+                if probe:
+                    # One batch call is enough to measure VRAM — skip the rest
+                    break
+
                 _clear_gpu_memory()
                 T_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_tests_group, effective_batch_size)
                 _clear_gpu_memory()
@@ -604,6 +608,7 @@ def fit_oraclevarx_tabpfn(
                 print(f"    PROBE p={p}: OOM at batch_size="
                       f"{effective_batch_size} - {e}")
                 _clear_gpu_memory()
+                tabpfn.clear_cache()
                 del fold_data[p]
                 gc.collect()
                 continue
@@ -630,6 +635,8 @@ def fit_oraclevarx_tabpfn(
             print(f"      VRAM after inference: "
                   f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
             print(f"      Time: {p_elapsed:.1f}s")
+            # Clear cache to release non-PyTorch CUDA workspace state between p values
+            tabpfn.clear_cache()
             del fold_data[p]
             gc.collect()
             continue
@@ -699,12 +706,13 @@ def fit_oraclevarx_tabpfn(
                   f"VRAM: {used:.1f}/{total:.1f} GB ({pct:.0f}%), "
                   f"residuals: {R_Y.shape}, forecast days: {len(forecast_Y_preds[p])}")
 
+        # Clear cache to release non-PyTorch CUDA workspace state between p values
+        # (models are lazily reloaded on next fit_predict_batch call)
+        tabpfn.clear_cache()
+
         # Delete fold_data for this p to free memory (minimizes peak memory)
         del fold_data[p]
         gc.collect()
-
-    # Clear TabPFN cache to free GPU memory
-    tabpfn.clear_cache()
 
     # Stop VRAM monitor thread
     if vram_thread is not None:
