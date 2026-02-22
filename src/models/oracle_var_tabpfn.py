@@ -555,69 +555,12 @@ def fit_oraclevarx_tabpfn(
 
         p_start_time = time.time()
 
-        if probe:
-            # --- PROBE: run 1 iteration with real batch size ---
-            effective_batch_size = _get_batch_size_for_p(
-                p, n_folds_p, n_confounders=n_confounders, verbose=verbose
-            )
-            print(f"\n  p={p}: PROBE mode, testing 1 iteration "
-                  f"with batch_size={effective_batch_size}")
-
-            # Take the first effective_batch_size folds for this iteration
-            probe_folds = folds_p[:effective_batch_size]
-            X_trains = [f['X_train'] for f in probe_folds]
-            Y_trains_Y = [f['Y_train'] for f in probe_folds]
-            Y_trains_T = [f['T_train'] for f in probe_folds]
-            X_tests = [f['X_test'] for f in probe_folds]
-
-            try:
-                _ = tabpfn.fit_predict_batch(
-                    X_trains, Y_trains_Y, X_tests, effective_batch_size
-                )
-                _clear_gpu_memory()
-                _ = tabpfn.fit_predict_batch(
-                    X_trains, Y_trains_T, X_tests, effective_batch_size
-                )
-                _clear_gpu_memory()
-            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-                probe_results[p] = {
-                    'status': 'OOM',
-                    'error': str(e),
-                    'controls_features': n_confounders * p,
-                    'batch_size_tested': effective_batch_size,
-                }
-                print(f"    PROBE p={p}: OOM at batch_size="
-                      f"{effective_batch_size} - {e}")
-                _clear_gpu_memory()
-                del fold_data[p]
-                gc.collect()
-                continue
-
-            p_elapsed = time.time() - p_start_time
-            used, total, pct = _get_vram_usage()
-            probe_results[p] = {
-                'status': 'PASS',
-                'controls_features': n_confounders * p,
-                'vram_used': used,
-                'vram_total': total,
-                'vram_pct': pct,
-                'time': p_elapsed,
-                'batch_size_tested': effective_batch_size,
-                'suggested_batch_size': effective_batch_size,
-            }
-            print(f"    PROBE p={p}: PASS (batch_size={effective_batch_size})")
-            print(f"      Controls features: {n_confounders * p} "
-                  f"({n_confounders} confounders x {p} lags)")
-            print(f"      VRAM after inference: "
-                  f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
-            print(f"      Time: {p_elapsed:.1f}s")
-            del fold_data[p]
-            gc.collect()
-            continue
-        # --- END PROBE --- normal mode below is UNCHANGED ---
-
         # Get batch size using size-based heuristic
         effective_batch_size = _get_batch_size_for_p(p, n_folds_p, n_confounders=n_confounders, verbose=verbose)
+
+        if probe:
+            print(f"\n  p={p}: PROBE mode, testing 1 iteration "
+                  f"with batch_size={effective_batch_size}")
 
         # Group folds by test size (batching requires same size)
         folds_by_test_size: Dict[int, List[int]] = {}
@@ -649,8 +592,47 @@ def fit_oraclevarx_tabpfn(
                 for group_idx, fold_idx in enumerate(fold_indices):
                     Y_preds_all[fold_idx] = Y_preds_group[group_idx]
                     T_preds_all[fold_idx] = T_preds_group[group_idx]
+
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            raise
+            if probe:
+                probe_results[p] = {
+                    'status': 'OOM',
+                    'error': str(e),
+                    'controls_features': n_confounders * p,
+                    'batch_size_tested': effective_batch_size,
+                }
+                print(f"    PROBE p={p}: OOM at batch_size="
+                      f"{effective_batch_size} - {e}")
+                _clear_gpu_memory()
+                del fold_data[p]
+                gc.collect()
+                continue
+            else:
+                raise
+
+        if probe:
+            # Record VRAM and skip residuals/forecasts
+            p_elapsed = time.time() - p_start_time
+            used, total, pct = _get_vram_usage()
+            probe_results[p] = {
+                'status': 'PASS',
+                'controls_features': n_confounders * p,
+                'vram_used': used,
+                'vram_total': total,
+                'vram_pct': pct,
+                'time': p_elapsed,
+                'batch_size_tested': effective_batch_size,
+                'suggested_batch_size': effective_batch_size,
+            }
+            print(f"    PROBE p={p}: PASS (batch_size={effective_batch_size})")
+            print(f"      Controls features: {n_confounders * p} "
+                  f"({n_confounders} confounders x {p} lags)")
+            print(f"      VRAM after inference: "
+                  f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
+            print(f"      Time: {p_elapsed:.1f}s")
+            del fold_data[p]
+            gc.collect()
+            continue
 
         # Compute residuals and store by absolute row index
         first_row = min(f['test_start'] for f in folds_p)
