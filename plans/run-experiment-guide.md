@@ -1,175 +1,242 @@
 # Experiment Execution Guide
 
-## Overview
+## 1. Methods Explained
 
-This guide covers running the full method comparison suite:
-- 16 runs across 3 confounder configs (vix, macro5, all10) and 4 tree learners + TabPFN
-- 35 unique model outputs: VAR(1) + ACLE-VAR(1) + VARX(3) + ACLE-VARX(3) + OR-VARX(12) + ORACLE-VARX(12) + ORACLE-VARX-TabPFN(3)
+| Method | Description | Requires GPU |
+|--------|-------------|:------------:|
+| **VAR** x 1 | Standard Vector Autoregression — forecasts ETF returns using only their own lagged values | No |
+| **ACLE-VAR** x 1 | VAR with Augmented Covariance-Learning Estimation — applies cross-validated elastic net regularization to VAR coefficients | No |
+| **VARX** x 3 | VAR with exogenous confounders — adds macro variables as extra predictors (OLS-fitted, no learner needed) | No |
+| **ACLE-VARX** x 3 | Regularized VARX via elastic net (OLS-fitted, no learner needed) | No |
+| **OR-VARX** x 12 | Orthogonal VARX — uses Double Machine Learning (DML) to partial out confounder effects with a tree-based first-stage learner, 4 learners x 3 confounder presets | No |
+| **ORACLE-VARX** x 12 | OR-VARX plus ACLE regularization on the second-stage coefficients, 4 learners x 3 confounder presets | No |
+| **ORACLE-VARX-TabPFN** x 3 | ORACLE-VARX using TabPFN (a GPU-based tabular transformer) as the first-stage learner, 3 confounder presets | **Yes** |
 
-## Confounder Configurations
+The four tree-based learners used in OR-VARX and ORACLE-VARX are: `lgbm`, `xgboost`, `rf`, `extra_trees`.
 
-| Config | Variables | Data starts | First DML forecast ~ | Eval years |
-|--------|-----------|-------------|---------------------|------------|
-| vix | VIX | ~2000 | ~2004 | ~17 yrs |
-| macro5 | VIX, DFF, T5YIE, DCOILWTICO, USEPUINDXD | ~2000 | ~2004 | ~17 yrs |
-| all10 | All 10 confounders | ~2000 | ~2004 | ~17 yrs |
+## 2. Confounder Presets
 
-> **Note**: Leading NaN confounders (from late-starting series like GVZCLS, mid-2008) are backfilled with 0.0 (log-return of 0 = "no change"), preserving all asset data from ~2000 onward. This means `macro5` and `all10` runs will take longer than previously estimated due to more data points.
+Each preset selects a different set of macro/financial variables as confounders (exogenous regressors):
 
-## Scripts
+| Preset | Variables | Description |
+|--------|-----------|-------------|
+| `vix` | VIX | CBOE Volatility Index |
+| `macro5` | VIX, DFF, T5YIE, DCOILWTICO, USEPUINDXD | 5 key macro variables |
+| `all10` | All 10 below | Full confounder set |
 
-### `run_combined_experiment.py` — Single (config, learner) pair
+**Variable definitions:**
 
-Runs up to 4 methods with amortized DML first stage:
+| Variable | Description |
+|----------|-------------|
+| VIX | CBOE Volatility Index (market fear gauge) |
+| DFF | Federal Funds Effective Rate |
+| T5YIE | 5-Year Breakeven Inflation Rate |
+| DCOILWTICO | WTI Crude Oil Price |
+| USEPUINDXD | US Economic Policy Uncertainty Index |
+| BAMLC0A4CBBB | ICE BofA BBB Corporate Bond Spread |
+| DFII10 | 10-Year Real Interest Rate (TIPS) |
+| DTWEXBGS | Trade-Weighted US Dollar Index (Broad Goods) |
+| DTWEXEMEGS | Trade-Weighted US Dollar Index (Emerging Markets) |
+| GVZCLS | CBOE Gold Volatility Index |
+
+## 3. Experiment Phases
+
+The orchestrator (`run_all_experiments.py`) organizes work into 4 CPU phases plus optional GPU runs:
+
+| Phase | What it runs | Methods produced | CPU/GPU |
+|-------|-------------|-----------------|---------|
+| **Phase 0** | VAR + ACLE-VAR baseline (no confounders) | VAR x 1, ACLE-VAR x 1 | CPU |
+| **Phase 1** | VIX x 4 learners (parallel tmux panes) | VARX, ACLE-VARX, OR-VARX x4, ORACLE-VARX x4 | CPU |
+| **Phase 2** | macro5 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
+| **Phase 3** | all10 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
+| **TabPFN** | 3 confounder presets (run manually) | ORACLE-VARX-TabPFN x3 | **GPU** |
+
+VARX and ACLE-VARX are OLS-only (no learner dependency) — they are computed once per confounder preset in the first learner run and skipped for subsequent learners.
+
+## 4. Prerequisites
+
+### Python
+
+Python 3.10+.
+
+### Dependencies (CPU — Phases 0-3)
 
 ```bash
-# Run all methods for VIX / lgbm
-python scripts/run_combined_experiment.py --confounders vix --learner lgbm --no-show --verbose
+pip install -r requirements-cpu.txt
+```
 
-# VAR + ACLE-VAR baseline (no confounders)
-python scripts/run_combined_experiment.py --no-confounders --no-show
+This installs PyTorch (CPU), scikit-learn, LightGBM, XGBoost, and other core packages. No GPU or CUDA required.
 
-# Quick smoke test with limited data
+### Dependencies (GPU — TabPFN)
+
+```bash
+pip install -r requirements-gpu.txt
+```
+
+This is a superset of `requirements-cpu.txt` that adds TabPFN and NVIDIA CUDA libraries. Requires an NVIDIA GPU with CUDA support.
+
+### HuggingFace Token (TabPFN only)
+
+TabPFN downloads model weights from HuggingFace. You need a free access token:
+
+1. Create an account at [huggingface.co](https://huggingface.co)
+2. Go to Settings > Access Tokens > New Token
+3. Export the token before running TabPFN experiments:
+
+```bash
+export HF_TOKEN=<your-token>
+```
+
+## 5. Setting Up on EC2
+
+### One-line setup
+
+```bash
+# CPU-only setup (Phases 0-3):
+curl -sSL https://raw.githubusercontent.com/HK-Tan/ORACLE-VARX/main/scripts/setup-ec2.sh | bash
+
+# GPU setup (TabPFN):
+curl -sSL https://raw.githubusercontent.com/HK-Tan/ORACLE-VARX/main/scripts/setup-ec2.sh | bash -s -- --gpu
+```
+
+### Manual setup
+
+```bash
+git clone https://github.com/HK-Tan/ORACLE-VARX.git
+cd ORACLE-VARX
+bash scripts/setup-ec2.sh          # CPU
+bash scripts/setup-ec2.sh --gpu    # GPU
+```
+
+### After setup
+
+```bash
+cd ORACLE-VARX
+source .venv/bin/activate
+```
+
+## 6. Running Experiments
+
+### Smoke test
+
+Run a quick test with limited data to verify everything works:
+
+```bash
 python scripts/run_combined_experiment.py --confounders vix --learner lgbm --n-days 1500 --no-show
 ```
 
-Key options:
-- `--confounders`: preset name (`vix`, `macro5`, `all10`) or comma-separated (`VIX,DFF`)
-- `--learner`: `lgbm`, `xgboost`, `rf`, `extra_trees`
-- `--n-jobs`: CPU cores per method (auto-computed if not specified)
-- `--no-confounders`: run VAR + ACLE-VAR baseline
+### Single experiment
 
-### `run_all_experiments.py` — tmux orchestrator
-
-Automates all 16 runs across 4 phases:
+Run one (confounder preset, learner) combination:
 
 ```bash
-# Run all phases
+# VIX with LightGBM (produces VARX, ACLE-VARX, OR-VARX, ORACLE-VARX)
+python scripts/run_combined_experiment.py --confounders vix --learner lgbm --no-show --verbose
+
+# VAR + ACLE-VAR baseline (no confounders)
+python scripts/run_combined_experiment.py --no-confounders --no-show --verbose
+```
+
+### Orchestrator (all CPU phases)
+
+The orchestrator launches all 4 phases sequentially, with each phase's learner runs in parallel tmux panes:
+
+```bash
+# Run everything
 python scripts/run_all_experiments.py --phase all --verbose
 
-# Run one phase
+# Run a single phase
 python scripts/run_all_experiments.py --phase 1 --verbose
 
-# Dry run to see commands
+# Preview commands without executing
 python scripts/run_all_experiments.py --phase all --dry-run
 ```
 
-## EC2 Setup
+### TabPFN (GPU)
+
+Run on a machine with an NVIDIA GPU:
 
 ```bash
-# 1. Launch c7i.4xlarge spot (Ubuntu 22.04, 30GB gp3)
-# 2. SSH in and run setup:
-curl -sSL https://raw.githubusercontent.com/HK-Tan/ORACLE-VARX/main/scripts/setup-ec2.sh | bash
-cd ORACLE-VARX && source .venv/bin/activate
+export HF_TOKEN=<your-token>
+
+# One preset at a time
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --no-show --verbose
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --no-show --verbose
 ```
 
-## Phase Execution
+## 7. CLI Reference
 
-### Phase 0: Baseline (sequential)
+### `run_combined_experiment.py`
+
+Runs up to 4 methods for a single (confounder preset, learner) pair with amortized DML first stage.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--confounders` | str | `vix` | Preset name (`vix`, `macro5`, `all10`) or comma-separated variable names |
+| `--no-confounders` | flag | — | Run VAR + ACLE-VAR baseline (no confounders) |
+| `--learner` | str | `lgbm` | First-stage learner: `lgbm`, `xgboost`, `rf`, `extra_trees` |
+| `--n-days` | int | all | Number of days to load (default: full dataset) |
+| `--validation-days` | int | `21` | Validation period in days |
+| `--p-max` | int | `10` | Maximum lag order |
+| `--alpha-grid` | str | `0.01,...,0.30` | Comma-separated alpha values for elastic net |
+| `--n-jobs` | int | auto | CPU cores per method |
+| `--device` | str | `cpu` | Device (`cpu` or `cuda`) |
+| `--output-dir` | str | `results` | Base results directory |
+| `--no-show` | flag | — | Don't display plots (use on headless servers) |
+| `--verbose` | flag | — | Print detailed progress |
+
+### `run_all_experiments.py`
+
+Orchestrates all experiment phases using tmux.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--phase` | str | *required* | Phase to run: `0`, `1`, `2`, `3`, or `all` |
+| `--n-jobs` | int | auto | CPU cores per tmux pane |
+| `--dry-run` | flag | — | Print commands without executing |
+| `--verbose` | flag | — | Pass `--verbose` to experiment scripts |
+
+### `run_oraclevarx_tabpfn_experiment.py`
+
+Runs ORACLE-VARX with TabPFN as the first-stage learner (GPU required).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--confounders` | str | `vix` | Preset name or comma-separated variable names |
+| `--n-days` | int | all | Number of days to load |
+| `--validation-days` | int | `21` | Validation period in days |
+| `--p-max` | int | `10` | Maximum lag order |
+| `--alpha-grid` | str | `0.01,...,0.30` | Comma-separated alpha values |
+| `--output-dir` | str | `results/oraclevarx_tabpfn` | Output directory |
+| `--name` | str | auto | Experiment name |
+| `--no-show` | flag | — | Don't display plots |
+| `--verbose` | flag | — | Print detailed progress |
+
+## 8. Output Structure
+
+Each method saves results under `results/<method>/<experiment_name>/`:
+
+| File | Contents |
+|------|----------|
+| `results.pt` | Model results (forecasts, coefficients, etc.) |
+| `pnl_results.pkl` | PnL data for all strategies |
+| `performance.csv` | Market-adjusted performance metrics |
+| `performance_raw.csv` | Raw performance with SPY benchmark |
+| `lag_analysis.png` | Optimal lag order (p) over time |
+| `strategy_comparison.png` | Market-adjusted strategy comparison chart |
+| `strategy_comparison_raw.png` | Raw strategy comparison vs SPY |
+
+## 9. Copying Results from EC2
+
+Using `scp`:
 
 ```bash
-tmux new -s phase0
-python scripts/run_combined_experiment.py --no-confounders --no-show --verbose
-# ~25 min
+scp -i <your-key.pem> -r ubuntu@<EC2-IP>:~/ORACLE-VARX/results/ ./results/
 ```
 
-### Phase 1: VIX x 4 learners (parallel)
+Using `rsync` (resume-capable, recommended for large transfers):
 
 ```bash
-tmux new-session -d -s vix
-tmux split-window -h -t vix
-tmux split-window -v -t vix:0.0
-tmux split-window -v -t vix:0.1
-tmux send-keys -t vix:0.0 'python scripts/run_combined_experiment.py --confounders vix --learner lgbm --no-show --verbose' Enter
-tmux send-keys -t vix:0.1 'python scripts/run_combined_experiment.py --confounders vix --learner xgboost --no-show --verbose' Enter
-tmux send-keys -t vix:0.2 'python scripts/run_combined_experiment.py --confounders vix --learner rf --no-show --verbose' Enter
-tmux send-keys -t vix:0.3 'python scripts/run_combined_experiment.py --confounders vix --learner extra_trees --no-show --verbose' Enter
-tmux attach -t vix
+rsync -avz -e "ssh -i <your-key.pem>" ubuntu@<EC2-IP>:~/ORACLE-VARX/results/ ./results/
 ```
-
-Wait for all to finish, then repeat for macro5 (Phase 2) and all10 (Phase 3).
-
-Or use the orchestrator:
-```bash
-python scripts/run_all_experiments.py --phase all --verbose
-```
-
-### Core Allocation
-
-| Instance | vCPU | Physical cores | Auto n_jobs/pane | Total used |
-|----------|------|---------------|------------------:|----------:|
-| c7i.4xlarge | 16 | 8 | 1 | 4 of 8 |
-| c7i.8xlarge | 32 | 16 | 3 | 12 of 16 |
-| c7i.12xlarge | 48 | 24 | 5 | 20 of 24 |
-
-Override with `--n-jobs N` when needed.
-
-## Run Table
-
-| Run | Config | Learner | Methods | Est. Time |
-|-----|--------|---------|---------|-----------|
-| 0 | none | OLS | VAR + ACLE-VAR | ~25 min |
-| 1 | vix | lgbm | VARX + ACLE-VARX + OR-VARX + ORACLE-VARX | ~25 min |
-| 2 | vix | xgboost | OR-VARX + ORACLE-VARX (VARX/ACLE skipped) | ~22 min |
-| 3 | vix | rf | OR-VARX + ORACLE-VARX | ~27 min |
-| 4 | vix | extra_trees | OR-VARX + ORACLE-VARX | ~22 min |
-| 5 | vix | TabPFN | ORACLE-VARX TabPFN | ~35 min (GPU) |
-| 6 | macro5 | lgbm | VARX + ACLE-VARX + OR-VARX + ORACLE-VARX | ~30 min |
-| 7 | macro5 | xgboost | OR-VARX + ORACLE-VARX | ~28 min |
-| 8 | macro5 | rf | OR-VARX + ORACLE-VARX | ~32 min |
-| 9 | macro5 | extra_trees | OR-VARX + ORACLE-VARX | ~28 min |
-| 10 | macro5 | TabPFN | ORACLE-VARX TabPFN | ~40 min (GPU) |
-| 11 | all10 | lgbm | VARX + ACLE-VARX + OR-VARX + ORACLE-VARX | ~35 min |
-| 12 | all10 | xgboost | OR-VARX + ORACLE-VARX | ~32 min |
-| 13 | all10 | rf | OR-VARX + ORACLE-VARX | ~37 min |
-| 14 | all10 | extra_trees | OR-VARX + ORACLE-VARX | ~32 min |
-| 15 | all10 | TabPFN | ORACLE-VARX TabPFN | ~45 min (GPU) |
-
-**VARX/ACLE-VARX** are OLS-only (no learner dependency) — runs 2-4, 7-9, 12-14 skip them since run 1/6/11 already computed them.
-
-## Wall-Clock Timeline (c7i.4xlarge)
-
-| Phase | What runs | Wall time |
-|-------|-----------|-----------|
-| Phase 0 | VAR + ACLE-VAR (sequential) | ~25 min |
-| Phase 1 | VIX x 4 learners (4 tmux panes) | ~27 min |
-| Phase 2 | macro5 x 4 learners (4 tmux panes) | ~32 min |
-| Phase 3 | all10 x 4 learners (4 tmux panes) | ~37 min |
-| **Total CPU** | | **~2 hours** |
-
-GPU (A100): Runs 5, 10, 15 sequential ~2 hours.
-
-## Copying Results
-
-From EC2 to local:
-```bash
-scp -i /home/hktan/AWS_Keys/EC2-Keys.pem -r \
-    ubuntu@<EC2-PUBLIC-IP>:~/ORACLE-VARX/results/* \
-    /home/hktan/ORACLE-VARX/results/
-```
-
-Or with rsync (resume-capable):
-```bash
-rsync -avz -e "ssh -i /home/hktan/AWS_Keys/EC2-Keys.pem" \
-    ubuntu@<EC2-PUBLIC-IP>:~/ORACLE-VARX/results/ \
-    /home/hktan/ORACLE-VARX/results/
-```
-
-## Output Structure
-
-Each method produces results in `results/<method>/<experiment_name>/`:
-- `results.pt` — model results (forecasts, coefficients, etc.)
-- `pnl_results.pkl` — PnL data for all strategies
-- `performance.csv` — market-adjusted performance metrics
-- `performance_raw.csv` — raw performance with SPY benchmark
-- `lag_analysis.png` — optimal lag (p) over time
-- `strategy_comparison.png` — market-adjusted strategy comparison
-- `strategy_comparison_raw.png` — raw strategy comparison vs SPY
-
-## Estimated Cost
-
-| Resource | Duration | Rate | Cost |
-|----------|----------|------|------|
-| 1x c7i.4xlarge spot | ~2.5 hr | ~$0.20/hr | ~$0.50 |
-| GPU (user's A100) | ~2 hr | $0 | $0 |
-| **Total** | | | **~$0.50** |
