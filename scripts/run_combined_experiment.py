@@ -65,15 +65,13 @@ def resolve_confounders(confounders_arg: str) -> list[str]:
 
 
 def compute_default_n_jobs() -> int:
-    """Compute default n_jobs for parallel tmux panes.
+    """Compute default n_jobs when run standalone (not via orchestrator).
 
-    When running 4 panes simultaneously on the same machine:
-    n_jobs = max(1, (physical_cores - 1) // 4)
-
-    This leaves headroom for OS, LightGBM internal threading, and memory bus.
+    Uses all physical cores minus one for OS headroom.
+    When launched via the orchestrator, --n-jobs is set explicitly per phase.
     """
     physical_cores = get_physical_cpu_count()
-    n_jobs = max(1, (physical_cores - 1) // 4)
+    n_jobs = max(1, physical_cores - 1)
     return n_jobs
 
 
@@ -218,7 +216,7 @@ def main(
     if n_jobs is None:
         n_jobs = compute_default_n_jobs()
         print(f"Auto-computed n_jobs={n_jobs} (physical_cores={get_physical_cpu_count()}, "
-              f"formula: max(1, (cores-1)//4))")
+              f"formula: max(1, cores-1))")
 
     output_dir = Path(output_dir)
     config = GridConfig()

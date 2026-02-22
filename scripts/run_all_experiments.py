@@ -77,11 +77,13 @@ def get_phase_commands(phase: int, n_jobs: int = None, verbose: bool = True) -> 
 
     if phase == 0:
         # All OLS baselines — run sequentially with full CPU access
+        cores = _get_physical_cores()
+        ols_jobs = n_jobs if n_jobs else max(1, cores - 1)
         return [
-            f"{SCRIPT} --no-confounders --no-show{verbose_arg}",
-            f"{SCRIPT} --confounders vix --ols-only --no-show{verbose_arg}",
-            f"{SCRIPT} --confounders macro5 --ols-only --no-show{verbose_arg}",
-            f"{SCRIPT} --confounders all10 --ols-only --no-show{verbose_arg}",
+            f"{SCRIPT} --no-confounders --no-show{verbose_arg} --n-jobs {ols_jobs}",
+            f"{SCRIPT} --confounders vix --ols-only --no-show{verbose_arg} --n-jobs {ols_jobs}",
+            f"{SCRIPT} --confounders macro5 --ols-only --no-show{verbose_arg} --n-jobs {ols_jobs}",
+            f"{SCRIPT} --confounders all10 --ols-only --no-show{verbose_arg} --n-jobs {ols_jobs}",
         ]
     elif phase in CONFOUNDER_CONFIGS:
         conf = CONFOUNDER_CONFIGS[phase]
