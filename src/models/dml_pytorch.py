@@ -370,26 +370,6 @@ def _build_test_features(
     return outcome, treatment, controls
 
 
-def _build_forecast_controls(W: np.ndarray, day_idx: int, p: int) -> np.ndarray:
-    """Build lagged control features for a single forecast day.
-
-    For forecasting day_idx, we need W values at [day_idx-1, ..., day_idx-p].
-
-    Args:
-        W: Full W array, shape (n_days, n_confounders)
-        day_idx: The day index to forecast (absolute index)
-        p: Lag order
-
-    Returns:
-        controls: Lagged W values, shape (n_confounders * p,)
-    """
-    n_confounders = W.shape[1]
-    controls = np.zeros(n_confounders * p, dtype=np.float32)
-    for lag in range(1, p + 1):
-        controls[(lag - 1) * n_confounders:lag * n_confounders] = W[day_idx - lag]
-    return controls
-
-
 def _prepare_all_fold_data(
     Y_np: np.ndarray,
     W_np: np.ndarray,
@@ -414,7 +394,7 @@ def _prepare_all_fold_data(
             'grid_idx', 'X_train', 'Y_train', 'T_train',
             'X_test', 'Y_test', 'T_test',
             'test_start', 'test_end',
-            'forecast_controls', 'forecast_day_indices'
+            'forecast_day_indices'
     """
     n_days = Y_np.shape[0]
 
@@ -443,13 +423,8 @@ def _prepare_all_fold_data(
                 Y_np, W_np, p, test_start, test_end
             )
 
-            # Collect forecast control features for test days in this fold's window
-            forecast_controls = []
-            forecast_day_indices = []
-            for test_day_idx in range(test_start, test_end):
-                fc = _build_forecast_controls(W_np, test_day_idx, p)
-                forecast_controls.append(fc)
-                forecast_day_indices.append(test_day_idx)
+            # Collect day indices for mapping local test positions to absolute days
+            forecast_day_indices = list(range(test_start, test_end))
 
             fold_data[p].append({
                 'grid_idx': grid_idx,
@@ -461,7 +436,6 @@ def _prepare_all_fold_data(
                 'T_test': treatment_test,
                 'test_start': test_start,
                 'test_end': test_end,
-                'forecast_controls': forecast_controls,
                 'forecast_day_indices': forecast_day_indices,
             })
 
@@ -537,13 +511,10 @@ def _process_folds_for_p(
         R_Y[local_start:local_end] = fold['Y_test'] - Y_pred
         R_T[local_start:local_end] = fold['T_test'] - T_pred
 
-        # Predict for forecast days
+        # Reuse test-set predictions for forecast days (X_test == forecast controls)
         for local_idx, day_idx in enumerate(fold['forecast_day_indices']):
-            fc = fold['forecast_controls'][local_idx].reshape(1, -1)
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-                forecast_Y_preds[day_idx] = model_y.predict(fc).squeeze(0)
-                forecast_T_preds[day_idx] = model_t.predict(fc).squeeze(0)
+            forecast_Y_preds[day_idx] = Y_pred[local_idx]
+            forecast_T_preds[day_idx] = T_pred[local_idx]
 
         # DELETE models immediately to free memory
         del model_y, model_t
