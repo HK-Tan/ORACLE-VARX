@@ -17,24 +17,35 @@ else
     echo "=== ORACLE-VARX EC2 Setup (CPU) ==="
 fi
 
+# Step counts differ: CPU has an extra step to install PyTorch from the CPU-only index
+if [ "$GPU" = true ]; then STEPS=4; else STEPS=5; fi
+STEP=0
+
 # Clone repo
-echo "[1/4] Cloning repository..."
+STEP=$((STEP+1)); echo "[$STEP/$STEPS] Cloning repository..."
 git clone https://github.com/HK-Tan/ORACLE-VARX.git
 cd ORACLE-VARX
 
 # Install uv
-echo "[2/4] Installing uv..."
+STEP=$((STEP+1)); echo "[$STEP/$STEPS] Installing uv..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.bashrc
 
 # Create venv
-echo "[3/4] Creating virtual environment..."
+STEP=$((STEP+1)); echo "[$STEP/$STEPS] Creating virtual environment..."
 ~/.local/bin/uv venv
 
 # Install dependencies
-echo "[4/4] Installing dependencies from $REQ_FILE..."
 source .venv/bin/activate
-~/.local/bin/uv pip install -r "$REQ_FILE"
+if [ "$GPU" = true ]; then
+    STEP=$((STEP+1)); echo "[$STEP/$STEPS] Installing dependencies from $REQ_FILE..."
+    ~/.local/bin/uv pip install -r "$REQ_FILE"
+else
+    STEP=$((STEP+1)); echo "[$STEP/$STEPS] Installing PyTorch (CPU-only)..."
+    ~/.local/bin/uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+    STEP=$((STEP+1)); echo "[$STEP/$STEPS] Installing remaining dependencies from $REQ_FILE..."
+    ~/.local/bin/uv pip install -r "$REQ_FILE"
+fi
 
 echo ""
 echo "=== Setup complete! ==="

@@ -240,3 +240,6 @@ Using `rsync` (resume-capable, recommended for large transfers):
 ```bash
 rsync -avz -e "ssh -i <your-key.pem>" ubuntu@<EC2-IP>:~/ORACLE-VARX/results/ ./results/
 ```
+
+
+> **Note on c8a vCPU counts:** The c8a instance family (AMD EPYC 5th gen) ships with SMT disabled by default (1 thread per core), so **1 vCPU = 1 physical core**. For example, `c8a.4xlarge` has 16 vCPUs = 16 physical cores. This differs from older families (c5, m5, etc.) where 2 vCPUs = 1 core due to hyperthreading.

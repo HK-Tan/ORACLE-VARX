@@ -99,37 +99,42 @@ def run_phase_tmux(phase: int, commands: list[str], dry_run: bool = False):
         capture_output=True,
     )
 
-    # Create new session with first command
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session_name],
-        check=True,
+    # Create new session and capture the first pane's unique ID
+    result = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session_name, "-P", "-F", "#{pane_id}"],
+        capture_output=True, text=True, check=True,
     )
+    pane_ids = [result.stdout.strip()]  # e.g. ["%0"]
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"{session_name}:0.0", commands[0], "Enter"],
+        ["tmux", "send-keys", "-t", pane_ids[0], commands[0], "Enter"],
         check=True,
     )
 
-    # Split window and send remaining commands
+    # Build 2x2 layout using stable pane IDs:
+    #   pane_ids[0] (top-left)  | pane_ids[1] (top-right)
+    #   pane_ids[2] (bot-left)  | pane_ids[3] (bot-right)
     for i, cmd in enumerate(commands[1:], start=1):
-        # Alternate horizontal and vertical splits for 2x2 layout
         if i == 1:
-            subprocess.run(
-                ["tmux", "split-window", "-h", "-t", session_name],
-                check=True,
-            )
+            # Horizontal split from pane 0 -> creates right pane
+            split_target = pane_ids[0]
+            split_dir = ["-h"]
         elif i == 2:
-            subprocess.run(
-                ["tmux", "split-window", "-v", "-t", f"{session_name}:0.0"],
-                check=True,
-            )
+            # Vertical split from pane 0 (top-left) -> creates bottom-left
+            split_target = pane_ids[0]
+            split_dir = ["-v"]
         elif i == 3:
-            subprocess.run(
-                ["tmux", "split-window", "-v", "-t", f"{session_name}:0.1"],
-                check=True,
-            )
+            # Vertical split from pane 1 (top-right) -> creates bottom-right
+            split_target = pane_ids[1]
+            split_dir = ["-v"]
+
+        result = subprocess.run(
+            ["tmux", "split-window"] + split_dir + ["-t", split_target, "-P", "-F", "#{pane_id}"],
+            capture_output=True, text=True, check=True,
+        )
+        pane_ids.append(result.stdout.strip())
 
         subprocess.run(
-            ["tmux", "send-keys", "-t", f"{session_name}:0.{i}", cmd, "Enter"],
+            ["tmux", "send-keys", "-t", pane_ids[i], cmd, "Enter"],
             check=True,
         )
 
