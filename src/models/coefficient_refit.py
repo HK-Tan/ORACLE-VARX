@@ -14,7 +14,7 @@ Usage:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 import torch
@@ -232,7 +232,7 @@ def refit_dml_coefficients_for_day_tabpfn(
     device = str(device).lower()
     if device not in {"cuda", "cpu"}:
         raise ValueError(f"device must be 'cuda' or 'cpu', got {device!r}")
-    theta_device = Y.device if device == "cuda" else torch.device("cpu")
+    theta_device = torch.device("cuda:0") if device == "cuda" else torch.device("cpu")
 
     result = PerPCoefficients(
         day_idx=day_idx,
@@ -284,3 +284,83 @@ def refit_dml_coefficients_for_day_tabpfn(
         del Y_model, T_model
 
     return result
+
+
+def pack_per_p_coefficients(result: PerPCoefficients) -> Dict[str, Any]:
+    """Pack PerPCoefficients into a serialization-safe payload."""
+    coefficients = {
+        int(p): coef.detach().cpu().numpy().astype(np.float32, copy=False)
+        for p, coef in result.coefficients.items()
+    }
+    return {
+        "day_idx": int(result.day_idx),
+        "date": str(result.date),
+        "p_star": int(result.p_star),
+        "asset_names": list(result.asset_names),
+        "coefficients": coefficients,
+    }
+
+
+def unpack_per_p_coefficients(payload: Dict[str, Any]) -> PerPCoefficients:
+    """Restore PerPCoefficients from a packed payload."""
+    result = PerPCoefficients(
+        day_idx=int(payload["day_idx"]),
+        date=str(payload["date"]),
+        p_star=int(payload["p_star"]),
+        asset_names=list(payload["asset_names"]),
+    )
+    for p, coef_np in payload["coefficients"].items():
+        result.coefficients[int(p)] = torch.from_numpy(
+            np.asarray(coef_np, dtype=np.float32)
+        )
+    return result
+
+
+def refit_dml_coefficients_for_day_tabpfn_spawn_worker(
+    label: str,
+    Y_np: np.ndarray,
+    W_np: np.ndarray,
+    day_idx: int,
+    p_star: int,
+    lookback: int,
+    asset_names: List[str],
+    date: str,
+    train_size: int,
+    device: str = "cuda",
+) -> Dict[str, Any]:
+    """Spawn-safe worker for one day of TabPFN coefficient refit."""
+    import os
+    import time
+    from types import SimpleNamespace
+
+    t0 = time.perf_counter()
+    pid = os.getpid()
+    print(
+        f"    [{label}] worker pid={pid}: starting TabPFN refit on {device} "
+        f"(date={date}, p*={p_star})"
+    )
+
+    Y = torch.from_numpy(np.asarray(Y_np, dtype=np.float32))
+    W = torch.from_numpy(np.asarray(W_np, dtype=np.float32))
+    config = SimpleNamespace(train_size=int(train_size))
+
+    per_p = refit_dml_coefficients_for_day_tabpfn(
+        Y=Y,
+        W=W,
+        day_idx=day_idx,
+        p_star=p_star,
+        lookback=lookback,
+        asset_names=asset_names,
+        date=date,
+        config=config,
+        device=device,
+    )
+
+    payload = pack_per_p_coefficients(per_p)
+    payload["label"] = label
+    payload["worker_pid"] = pid
+    payload["elapsed_seconds"] = time.perf_counter() - t0
+    print(
+        f"    [{label}] worker pid={pid}: completed in {payload['elapsed_seconds']:.1f}s"
+    )
+    return payload
