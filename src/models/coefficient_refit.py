@@ -205,7 +205,7 @@ def refit_dml_coefficients_for_day_tabpfn(
     asset_names: List[str],
     date: str,
     config,
-    device: str = 'cuda',
+    device: str = 'cpu',
 ) -> PerPCoefficients:
     """Refit DML coefficients using TabPFN for a single day.
 
@@ -228,6 +228,11 @@ def refit_dml_coefficients_for_day_tabpfn(
     """
     from src.models.dml_pytorch import _build_lagged_features, _build_test_features, estimate_theta
     from src.modules.factory import get_multi_output_regressor
+
+    device = str(device).lower()
+    if device not in {"cuda", "cpu"}:
+        raise ValueError(f"device must be 'cuda' or 'cpu', got {device!r}")
+    theta_device = Y.device if device == "cuda" else torch.device("cpu")
 
     result = PerPCoefficients(
         day_idx=day_idx,
@@ -257,8 +262,8 @@ def refit_dml_coefficients_for_day_tabpfn(
         )
 
         # Use TabPFN via factory
-        Y_model = get_multi_output_regressor('tabpfn')
-        T_model = get_multi_output_regressor('tabpfn')
+        Y_model = get_multi_output_regressor('tabpfn', device=device)
+        T_model = get_multi_output_regressor('tabpfn', device=device)
 
         import warnings
         with warnings.catch_warnings():
@@ -269,8 +274,8 @@ def refit_dml_coefficients_for_day_tabpfn(
         Y_pred = Y_model.predict(controls_ols)
         T_pred = T_model.predict(controls_ols)
 
-        R_Y = torch.from_numpy((outcome_ols - Y_pred).astype(np.float32)).to(Y.device)
-        R_T = torch.from_numpy((treatment_ols - T_pred).astype(np.float32)).to(Y.device)
+        R_Y = torch.from_numpy((outcome_ols - Y_pred).astype(np.float32)).to(theta_device)
+        R_T = torch.from_numpy((treatment_ols - T_pred).astype(np.float32)).to(theta_device)
 
         theta = estimate_theta(R_Y, R_T)
         A_matrices = theta.view(p, n_assets, n_assets)
