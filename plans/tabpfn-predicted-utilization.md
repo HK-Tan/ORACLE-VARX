@@ -12,6 +12,10 @@ This note records predicted utilization from the new batch size formula.
   `batch_size = floor(target_vram_pct * total_vram_gb / per_fold_gb)`, clipped to `[1, 228]`
 - **Predicted utilization metric**:
   `pred_torch_util_pct = 100 * (batch_size * per_fold_gb) / total_vram_gb`
+- **CUDA allocator**: Requires `expandable_segments:True` (set automatically by the
+  experiment script). Without this, PyTorch's default block allocator fragments CUDA
+  memory across p values with different tensor shapes, causing OOM even when torch
+  reports near-zero usage. See `tabpfn-computational-complexity.md` for details.
 
 The formula sizes batches so that predicted torch allocation stays near 65% of total VRAM,
 leaving headroom for framework overhead and non-batch allocations. The batch size cap of 228

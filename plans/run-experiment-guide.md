@@ -175,7 +175,10 @@ Run on a machine with an NVIDIA GPU:
 ```bash
 export HF_TOKEN=<your-token>
 
-# One preset at a time
+# All three presets sequentially (vix → macro5 → all10)
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all --no-show --verbose
+
+# Or one preset at a time
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --no-show --verbose
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --no-show --verbose
@@ -223,7 +226,7 @@ Runs ORACLE-VARX with TabPFN as the first-stage learner (GPU required).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `--confounders` | str | `vix` | Preset name or comma-separated variable names |
+| `--confounders` | str | `vix` | Preset name (`vix`/`macro5`/`all10`), `all` to run all three sequentially, or comma-separated variable names |
 | `--n-days` | int | all | Number of days to load |
 | `--validation-days` | int | `21` | Validation period in days |
 | `--p-max` | int | `10` | Maximum lag order |
