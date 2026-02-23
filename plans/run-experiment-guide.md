@@ -179,6 +179,9 @@ export HF_TOKEN=<your-token>
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --no-show --verbose
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --no-show --verbose
+
+# Just probing VRAM behaviors
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
 ```
 
 ## 7. CLI Reference
