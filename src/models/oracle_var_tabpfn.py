@@ -635,7 +635,7 @@ def fit_oraclevarx_tabpfn(
             print(f"      VRAM after inference: "
                   f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
             print(f"      Time: {p_elapsed:.1f}s")
-            # Clear cache to release non-PyTorch CUDA workspace state between p values
+            _clear_gpu_memory()
             tabpfn.clear_cache()
             del fold_data[p]
             gc.collect()
