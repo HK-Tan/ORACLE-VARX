@@ -5,10 +5,10 @@ Supports tree-based learners with native parallelization:
 - lgbm: LightGBM
 - rf: sklearn RandomForestRegressor
 - extra_trees: sklearn ExtraTreesRegressor
-- tabpfn: TabPFN transformer-based regressor (GPU required)
+- tabpfn: TabPFN transformer-based regressor
 
 Tree-based learners use n_jobs for CPU parallelization.
-TabPFN requires GPU and a HuggingFace token (HF_TOKEN environment variable).
+TabPFN typically runs on GPU (recommended), but can be configured for CPU.
 """
 import os
 import xgboost as xgb
@@ -54,7 +54,7 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
 
     Raises:
         ValueError: If unknown regressor name
-        RuntimeError: If TabPFN requested but CUDA is not available
+        RuntimeError: If TabPFN CUDA mode is requested but CUDA is unavailable
         ImportError: If TabPFN not installed
     """
     n_jobs = resolve_n_jobs(n_jobs)
@@ -87,9 +87,14 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
 
     elif name == 'tabpfn':
         import torch
-        if not torch.cuda.is_available():
+        tabpfn_device = str(kwargs.pop("device", "cuda")).lower()
+        if tabpfn_device not in {"cuda", "cpu"}:
+            raise ValueError(
+                f"TabPFN device must be 'cuda' or 'cpu', got {tabpfn_device!r}"
+            )
+        if tabpfn_device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError(
-                "TabPFN requires GPU but CUDA is not available. "
+                "TabPFN device='cuda' requires GPU but CUDA is not available. "
                 "Please run on a machine with GPU support."
             )
         # Disable posthog telemetry (~200ms latency per fit() call)
@@ -111,7 +116,7 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
             )
         # n_estimators=1 reduces CPU preprocessing overhead by ~2.5x
         # (default is 8, but preprocessing is CPU-bound and dominates runtime)
-        return TabPFNRegressor(device='cuda', random_state=42, **kwargs)
+        return TabPFNRegressor(device=tabpfn_device, random_state=42, **kwargs)
 
     else:
         raise ValueError(
@@ -139,5 +144,4 @@ def get_multi_output_regressor(name: str, n_jobs: int = -1, **kwargs) -> Any:
     from sklearn.multioutput import MultiOutputRegressor
     base = get_regressor(name, n_jobs=n_jobs, **kwargs)
     return MultiOutputRegressor(base, n_jobs=1)
-
 

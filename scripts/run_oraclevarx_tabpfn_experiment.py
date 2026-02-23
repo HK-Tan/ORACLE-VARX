@@ -358,11 +358,12 @@ def main(
         abs_day_idx = lookback + validation_days + result_day_idx
         p_star = int(result.p_optimal[result_day_idx].item())
         date_str = result.dates[result_day_idx]
+        print(f"  Refitting per-p coefficients for {label} ({date_str}) on CPU...")
 
         per_p_coefs = refit_dml_coefficients_for_day_tabpfn(
             Y=Y_etf, W=W, day_idx=abs_day_idx, p_star=p_star,
             lookback=lookback, asset_names=etf_tickers, date=date_str,
-            config=config, device='cuda',
+            config=config, device='cpu',
         )
 
         save_path = experiment_dir / f"coefficient_evolution_{label}.png"
