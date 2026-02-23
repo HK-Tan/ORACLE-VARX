@@ -48,6 +48,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ['TABPFN_NO_TELEMETRY'] = '1'
 os.environ['DO_NOT_TRACK'] = '1'
 
+# Use expandable segments allocator to prevent CUDA memory fragmentation
+# across p values with different tensor shapes (requires PyTorch >= 2.1).
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 class _FakePosthog:
     """Mock posthog to prevent any network calls."""
     def __getattr__(self, name):
@@ -414,7 +418,8 @@ Example:
     )
     parser.add_argument("--n-days", type=int, default=None, help="Number of days to load (default: all)")
     parser.add_argument("--confounders", type=str, default="vix",
-                        help="Confounder config: preset name (vix/macro5/all10) or comma-separated names (default: vix)")
+                        help="Confounder config: preset name (vix/macro5/all10), 'all' to run all three sequentially, "
+                             "or comma-separated names (default: vix)")
     parser.add_argument("--validation-days", type=int, default=21, help="Validation period (default: 21)")
     parser.add_argument("--p-max", type=int, default=10, help="Maximum lag order (default: 10)")
     parser.add_argument("--alpha-grid", type=str, default=None,
@@ -439,15 +444,25 @@ Example:
     if args.alpha_grid:
         alpha_grid = [float(x.strip()) for x in args.alpha_grid.split(",")]
 
-    main(
-        n_days=args.n_days,
-        confounders=args.confounders,
-        validation_days=args.validation_days,
-        p_max=args.p_max,
-        alpha_grid=alpha_grid,
-        output_dir=args.output_dir,
-        experiment_name=args.name,
-        show_plots=not args.no_show,
-        verbose=args.verbose,
-        probe=args.probe,
-    )
+    # Resolve confounder presets to run
+    ALL_PRESETS = ["vix", "macro5", "all10"]
+    confounder_runs = ALL_PRESETS if args.confounders == "all" else [args.confounders]
+
+    for i, conf in enumerate(confounder_runs):
+        if len(confounder_runs) > 1:
+            print(f"{'=' * 80}")
+            print(f"  Run {i + 1}/{len(confounder_runs)}: --confounders {conf}")
+            print(f"{'=' * 80}\n")
+
+        main(
+            n_days=args.n_days,
+            confounders=conf,
+            validation_days=args.validation_days,
+            p_max=args.p_max,
+            alpha_grid=alpha_grid,
+            output_dir=args.output_dir,
+            experiment_name=args.name,
+            show_plots=not args.no_show,
+            verbose=args.verbose,
+            probe=args.probe,
+        )
