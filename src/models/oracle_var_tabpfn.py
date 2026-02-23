@@ -134,22 +134,19 @@ def _get_batch_size_for_p(
     target_vram_pct: float = 0.65,
     verbose: bool = False,
 ) -> int:
-    """Get batch size for a given lag order p using empirical linear VRAM model.
+    """Get batch size for a given lag order p using empirical scaling formula.
 
-    Per-fold VRAM cost scales linearly with total features f = n_confounders * p:
-        per_fold_gb = 0.088 * f
+    Batch size = floor(6 * total_vram_gb / (n_confounders * p^1.5)).
 
-    Batch size = floor(target_vram_pct * total_vram_gb / per_fold_gb).
-
-    Slope calibrated from actual runs on A100 80 GB with expandable_segments
-    enabled (B=228 folds, f=1..3, VIX preset). Default target_vram_pct=0.65
-    targets ~65% VRAM utilization.
+    Starting-point formula calibrated from VIX runs on A100 80 GB. The
+    coefficient (6) and exponent (1.5) will be refined after probing all
+    presets.  target_vram_pct is currently unused but kept for future tuning.
 
     Args:
         p: Lag order (1 to p_max).
         n_folds: Total number of folds available (for capping).
         n_confounders: Number of confounders (default: 1 for VIX).
-        target_vram_pct: Fraction of total VRAM to use as budget (default: 0.65).
+        target_vram_pct: Fraction of total VRAM to use as budget (reserved for future use).
         verbose: Print batch size calculation details.
 
     Returns:
@@ -157,17 +154,13 @@ def _get_batch_size_for_p(
     """
     _, total_vram_gb, _ = _get_vram_usage()
 
-    f = n_confounders * p
-    per_fold_gb = 0.088 * f
-    vram_budget = target_vram_pct * total_vram_gb
-
-    batch_size = int(vram_budget / per_fold_gb)
+    batch_size = int(6 * total_vram_gb / (n_confounders * p ** 1.5))
     batch_size = min(batch_size, n_folds)
     batch_size = max(1, batch_size)
 
     if verbose:
-        print(f"    p={p}: f={f}, per_fold={per_fold_gb:.4f} GB, "
-              f"budget={vram_budget:.1f} GB ({target_vram_pct*100:.0f}% of {total_vram_gb:.0f} GB) "
+        print(f"    p={p}: n_c={n_confounders}, "
+              f"6*{total_vram_gb:.0f}/({n_confounders}*{p}^1.5) "
               f"-> batch={batch_size} (n_folds={n_folds})")
 
     return batch_size
