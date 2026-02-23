@@ -16,6 +16,7 @@ Classes:
     BatchedFoldTabPFN: True batched inference using TabPFN's batch dimension
 """
 
+import gc
 import os
 import warnings
 from typing import Optional, List, Tuple
@@ -390,4 +391,5 @@ class BatchedFoldTabPFN:
         self._bardists = []
         self._y_stats = []
         self._regressor = None
+        gc.collect()  # Break circular refs in TabPFNRegressor so GPU tensors are freed
         torch.cuda.empty_cache()
