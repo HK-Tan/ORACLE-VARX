@@ -706,13 +706,12 @@ def fit_oraclevarx_tabpfn(
                   f"VRAM: {used:.1f}/{total:.1f} GB ({pct:.0f}%), "
                   f"residuals: {R_Y.shape}, forecast days: {len(forecast_Y_preds[p])}")
 
-        # Clear cache to release non-PyTorch CUDA workspace state between p values
-        # (models are lazily reloaded on next fit_predict_batch call)
-        tabpfn.clear_cache()
-
         # Delete fold_data for this p to free memory (minimizes peak memory)
         del fold_data[p]
         gc.collect()
+
+    # Clear TabPFN cache once after all p values are done
+    tabpfn.clear_cache()
 
     # Stop VRAM monitor thread
     if vram_thread is not None:
