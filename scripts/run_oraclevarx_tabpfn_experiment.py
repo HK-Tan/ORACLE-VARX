@@ -124,6 +124,7 @@ def main(
     import numpy as np
     import torch
     import time
+    import multiprocessing as mp
     from datetime import datetime
 
     from src.data.loader import prepare_tensors
@@ -135,7 +136,11 @@ def main(
         plot_strategy_comparison,
         plot_lag_analysis,
     )
-    from src.models.coefficient_refit import refit_dml_coefficients_for_day_tabpfn, get_target_days
+    from src.models.coefficient_refit import (
+        get_target_days,
+        refit_dml_coefficients_for_day_tabpfn_spawn_worker,
+        unpack_per_p_coefficients,
+    )
     from src.evaluation.plotting import plot_coefficient_evolution_per_p
     from src.evaluation.backtest import save_experiment_results
     from src.evaluation.plotting import print_performance_summary
@@ -354,18 +359,74 @@ def main(
 
     # Plot 4+: Per-p coefficient evolution for target days (TabPFN refit)
     targets = get_target_days(result)
+    target_tasks = []
     for label, result_day_idx in targets:
         abs_day_idx = lookback + validation_days + result_day_idx
         p_star = int(result.p_optimal[result_day_idx].item())
         date_str = result.dates[result_day_idx]
-        print(f"  Refitting per-p coefficients for {label} ({date_str}) on CPU...")
-
-        per_p_coefs = refit_dml_coefficients_for_day_tabpfn(
-            Y=Y_etf, W=W, day_idx=abs_day_idx, p_star=p_star,
-            lookback=lookback, asset_names=etf_tickers, date=date_str,
-            config=config, device='cpu',
+        target_tasks.append(
+            {
+                "label": label,
+                "result_day_idx": result_day_idx,
+                "abs_day_idx": abs_day_idx,
+                "p_star": p_star,
+                "date_str": date_str,
+            }
         )
 
+    print("  Launching 2 spawned GPU workers for coefficient refit (one per target day)...")
+    for task in target_tasks:
+        print(
+            f"    dispatch: {task['label']} ({task['date_str']}), "
+            f"abs_day_idx={task['abs_day_idx']}, p*={task['p_star']}"
+        )
+
+    Y_etf_np = Y_etf.detach().cpu().numpy().astype(np.float32, copy=False)
+    W_np = W.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=2) as pool:
+        async_results = {}
+        for task in target_tasks:
+            label = task["label"]
+            async_results[label] = pool.apply_async(
+                refit_dml_coefficients_for_day_tabpfn_spawn_worker,
+                kwds={
+                    "label": label,
+                    "Y_np": Y_etf_np,
+                    "W_np": W_np,
+                    "day_idx": task["abs_day_idx"],
+                    "p_star": task["p_star"],
+                    "lookback": lookback,
+                    "asset_names": etf_tickers,
+                    "date": task["date_str"],
+                    "train_size": config.train_size,
+                    "device": "cuda",
+                },
+            )
+
+        per_p_payloads = {}
+        for task in target_tasks:
+            label = task["label"]
+            try:
+                payload = async_results[label].get()
+            except Exception:
+                print(
+                    f"  ERROR: spawned GPU coefficient refit failed for "
+                    f"{label} ({task['date_str']})."
+                )
+                raise
+            per_p_payloads[label] = payload
+            print(
+                f"  completed: {label} worker_pid={payload['worker_pid']} "
+                f"time={payload['elapsed_seconds']:.1f}s"
+            )
+
+    for task in target_tasks:
+        label = task["label"]
+        date_str = task["date_str"]
+        p_star = task["p_star"]
+        per_p_coefs = unpack_per_p_coefficients(per_p_payloads[label])
         save_path = experiment_dir / f"coefficient_evolution_{label}.png"
         plot_coefficient_evolution_per_p(
             per_p_coefs,
