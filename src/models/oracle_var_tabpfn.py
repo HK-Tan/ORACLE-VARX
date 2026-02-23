@@ -137,14 +137,13 @@ def _get_batch_size_for_p(
     """Get batch size for a given lag order p using empirical linear VRAM model.
 
     Per-fold VRAM cost scales linearly with total features f = n_confounders * p:
-        per_fold_gb = 0.0171 * f + 0.1292
+        per_fold_gb = 0.088 * f
 
     Batch size = floor(target_vram_pct * total_vram_gb / per_fold_gb).
 
-    Coefficients fitted from 37 probe data points across A6000/A100 GPUs
-    with n_confounders in {1, 5, 10}. Conservative upper bound (never
-    underestimates actual cost). Default target_vram_pct=0.65 targets ~60%
-    torch utilization, leaving headroom for CUDA workspace overhead.
+    Slope calibrated from actual runs on A100 80 GB with expandable_segments
+    enabled (B=228 folds, f=1..3, VIX preset). Default target_vram_pct=0.65
+    targets ~65% VRAM utilization.
 
     Args:
         p: Lag order (1 to p_max).
@@ -159,7 +158,7 @@ def _get_batch_size_for_p(
     _, total_vram_gb, _ = _get_vram_usage()
 
     f = n_confounders * p
-    per_fold_gb = 0.0171 * f + 0.1292
+    per_fold_gb = 0.088 * f
     vram_budget = target_vram_pct * total_vram_gb
 
     batch_size = int(vram_budget / per_fold_gb)
