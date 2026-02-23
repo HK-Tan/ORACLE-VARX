@@ -73,11 +73,12 @@ Typical memory usage:
 
 ## Adaptive Batch Size
 
-For higher lag orders (p), the number of features increases, consuming more VRAM. Batch size scales with a size-based heuristic that also accounts for the number of confounders:
+For higher lag orders (p), the number of features increases, consuming more VRAM. Batch size is determined by an empirical linear VRAM model fitted from 37 probe data points:
 
 ```python
-confounder_scale = 10.0 / (9 + n_confounders)
-batch_size = int(confounder_scale * 6 * VRAM_GB / (p ** 1.5))
+f = n_confounders * p
+per_fold_gb = 0.0171 * f + 0.1292
+batch_size = int(0.65 * VRAM_GB / per_fold_gb)
 ```
 
 See `plans/vram-considerations-tabpfn.md` for detailed tables and tuning guidance.
@@ -155,13 +156,15 @@ Probe shares the exact same grouped code path as non-probe (including
 
 ### Batch Size Scaling for Confounders
 
-`_get_batch_size_for_p()` accounts for confounder count with:
+`_get_batch_size_for_p()` uses an empirical linear VRAM model where confounder count is unified into the feature count:
 
 ```
-batch_size = int(10 / (9 + n_confounders) * 6 * VRAM_GB / p^1.5)
+f = n_confounders * p
+per_fold_gb = 0.0171 * f + 0.1292
+batch_size = floor(0.65 * VRAM_GB / per_fold_gb)
 ```
 
-Scaling factors: VIX (1 confounder) = 1.0x, macro5 (5) = 0.71x, all10 (10) = 0.53x.
+Confounders naturally increase `f`, reducing batch size proportionally. No separate scaling factor needed.
 
 ### Usage
 

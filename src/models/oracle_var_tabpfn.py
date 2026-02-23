@@ -127,42 +127,49 @@ def _reset_torch_cuda_peak_stats() -> None:
         torch.cuda.reset_peak_memory_stats()
 
 
-def _get_batch_size_for_p(p: int, n_folds: int, n_confounders: int = 1, verbose: bool = False) -> int:
-    """Get batch size for a given lag order p using size-based heuristic.
+def _get_batch_size_for_p(
+    p: int,
+    n_folds: int,
+    n_confounders: int = 1,
+    target_vram_pct: float = 0.65,
+    verbose: bool = False,
+) -> int:
+    """Get batch size for a given lag order p using empirical linear VRAM model.
 
-    Uses formula: batch_size = (10 * numerator) / (p^1.5 * (9 + n_confounders))
+    Per-fold VRAM cost scales linearly with total features f = n_confounders * p:
+        per_fold_gb = 0.0171 * f + 0.1292
 
-    where numerator = 6 * VRAM_GB. The (9 + n_confounders) term accounts for
-    total variable load: 9 assets are always present, confounders add on top.
-    With n_confounders=1 (VIX), the scaling factor is 10/10 = 1.0x, preserving
-    exact backward compatibility. With macro5 (5 confounders) it's 10/14 = 0.71x,
-    and all10 (10 confounders) gives 10/19 = 0.53x.
+    Batch size = floor(target_vram_pct * total_vram_gb / per_fold_gb).
+
+    Coefficients fitted from 37 probe data points across A6000/A100 GPUs
+    with n_confounders in {1, 5, 10}. Conservative upper bound (never
+    underestimates actual cost). Default target_vram_pct=0.65 targets ~60%
+    torch utilization, leaving headroom for CUDA workspace overhead.
 
     Args:
-        p: Lag order (1 to p_max)
-        n_folds: Total number of folds available (for capping)
-        n_confounders: Number of confounders (default: 1 for VIX backward compat)
-        verbose: Print batch size calculation
+        p: Lag order (1 to p_max).
+        n_folds: Total number of folds available (for capping).
+        n_confounders: Number of confounders (default: 1 for VIX).
+        target_vram_pct: Fraction of total VRAM to use as budget (default: 0.65).
+        verbose: Print batch size calculation details.
 
     Returns:
         Batch size (minimum 1, capped at n_folds).
     """
-    # Get available VRAM
     _, total_vram_gb, _ = _get_vram_usage()
 
-    # Scale factor: 6 * VRAM (calibrated for 80GB → 480 numerator)
-    numerator = 6 * total_vram_gb
+    f = n_confounders * p
+    per_fold_gb = 0.0171 * f + 0.1292
+    vram_budget = target_vram_pct * total_vram_gb
 
-    # Scale down for more confounders: (9 + n_confounders) captures total variable load
-    confounder_scale = 10.0 / (9 + n_confounders)
-    batch_size = int(confounder_scale * numerator / (p ** 1.5))
+    batch_size = int(vram_budget / per_fold_gb)
     batch_size = min(batch_size, n_folds)
     batch_size = max(1, batch_size)
 
     if verbose:
-        print(f"    p={p}: batch_size = {confounder_scale:.2f}x * {numerator:.0f}/{p}^1.5 = "
-              f"{int(confounder_scale * numerator / (p ** 1.5))} → capped to {batch_size} "
-              f"(n_confounders={n_confounders})")
+        print(f"    p={p}: f={f}, per_fold={per_fold_gb:.4f} GB, "
+              f"budget={vram_budget:.1f} GB ({target_vram_pct*100:.0f}% of {total_vram_gb:.0f} GB) "
+              f"-> batch={batch_size} (n_folds={n_folds})")
 
     return batch_size
 
@@ -368,7 +375,7 @@ def fit_oraclevarx_tabpfn(
     n_estimators: int = 8,
     device: str = 'cuda',
     verbose: bool = False,
-    target_vram_pct: float = 0.70,
+    target_vram_pct: float = 0.65,
     probe: bool = False,
 ) -> Optional[ORACLEVARXResult]:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
@@ -393,8 +400,8 @@ def fit_oraclevarx_tabpfn(
         n_estimators: Number of TabPFN ensemble members (default: 8)
         device: Device for TabPFN ('cuda' or 'cpu')
         verbose: Print detailed progress
-        target_vram_pct: Target VRAM usage (default 0.70 = 70%). Batch size is
-            automatically determined per p using a 2-point VRAM probe.
+        target_vram_pct: Fraction of total VRAM to use for batch sizing (default 0.65).
+            Targets ~60% torch utilization, leaving headroom for CUDA workspace.
         probe: If True, run 1 iteration per p with the real heuristic batch size
             to empirically test VRAM usage. Prints a summary table and returns None.
 
@@ -591,7 +598,12 @@ def fit_oraclevarx_tabpfn(
         _reset_torch_cuda_peak_stats()
 
         # Get batch size using size-based heuristic
-        effective_batch_size = _get_batch_size_for_p(p, n_folds_p, n_confounders=n_confounders, verbose=verbose)
+        effective_batch_size = _get_batch_size_for_p(
+            p, n_folds_p,
+            n_confounders=n_confounders,
+            target_vram_pct=target_vram_pct,
+            verbose=verbose,
+        )
 
         if probe:
             print(f"\n  p={p}: PROBE mode, testing 1 iteration "

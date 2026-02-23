@@ -2,119 +2,101 @@
 
 ## Batch Size Heuristic
 
-After extensive testing, we use a **simple size-based heuristic** rather than runtime VRAM probing. The probing approach proved unreliable due to PyTorch memory caching and the difficulty of capturing TabPFN's full memory footprint (CUDA kernels, cuBLAS workspaces, attention buffers).
+After extensive testing, we use an **empirical linear VRAM model** rather than runtime VRAM probing. The probing approach proved unreliable due to PyTorch memory caching and the difficulty of capturing TabPFN's full memory footprint (CUDA kernels, cuBLAS workspaces, attention buffers).
 
 **Formula:**
 ```
-batch_size = (10 / (9 + n_confounders)) × (6 × VRAM_GB) / p^1.5
+batch_size = floor(target_vram_pct * VRAM_GB / per_fold_gb)
+per_fold_gb = 0.0171 * f + 0.1292
+f = n_confounders * p
 ```
 
 Where:
 - `VRAM_GB`: Total GPU memory in GB
-- `p`: Lag order (1 to p_max)
-- `p^1.5`: Super-linear scaling to account for attention memory growth
-- `n_confounders`: Number of confounders (1 for VIX, 5 for macro5, 10 for all10)
-- `10 / (9 + n_confounders)`: Confounder scaling factor (9 assets always present)
-
-### Confounder Scaling
-
-The `(9 + n_confounders)` term captures total variable load: 9 assets are always
-present in the batch dimension, confounders add features on top. The scaling factor
-`10 / (9 + n_confounders)` ensures backward compatibility with VIX (1 confounder):
-
-| Preset | n_confounders | Scale Factor | Effect |
-|--------|---------------|-------------|--------|
-| vix | 1 | 10/10 = 1.00x | Exact backward compat |
-| macro5 | 5 | 10/14 = 0.71x | ~30% smaller batches |
-| all10 | 10 | 10/19 = 0.53x | ~47% smaller batches |
+- `f`: Total features = n_confounders x p
+- `per_fold_gb`: Predicted VRAM cost per fold (empirically fitted from 37 probe data points)
+- `target_vram_pct`: Fraction of total VRAM to use (default: 0.65)
 
 ## Why This Formula?
 
-### Linear VRAM Scaling
-Calibrated so that 80GB GPU gets numerator of 480:
-- `6 × 80 = 480`
+### Linear Feature Scaling
+Per-fold VRAM cost scales linearly with `f = n_confounders * p`. Coefficients (0.0171, 0.1292) fitted from 37 probe data points across A6000/A100 GPUs with n_confounders in {1, 5, 10}. The fit is a conservative upper bound that never underestimates actual cost.
 
-The coefficient of 6 was empirically tuned on A100 80GB with ~228 folds.
+### Unified Confounder Handling
+Unlike the old formula which had a separate `10/(9+n_confounders)` scaling factor, confounders are now naturally incorporated via `f = n_confounders * p`. No separate scaling needed.
 
-### Super-linear p Scaling
-Higher p means more treatment features (n_assets × p), which increases memory super-linearly due to:
-1. **Attention matrices**: O(features²) in the attention mechanism
-2. **Intermediate activations**: Scale with feature count
-3. **cuBLAS workspaces**: Grow with matrix dimensions
-
-The `p^1.5` exponent provides extra safety margin for larger p values.
+### Default Target: 65% VRAM
+`target_vram_pct=0.65` targets ~60% actual torch utilization, leaving headroom for CUDA workspace overhead that PyTorch doesn't track.
 
 ## Expected Batch Sizes by GPU (VIX, n_confounders=1)
 
 ### 8GB GPU (e.g., RTX 3070)
-Numerator = 6 × 8 = 48
+Budget = 0.65 x 8 = 5.2 GB
 
-| p | Batch Size |
-|---|------------|
-| 1 | 48 |
-| 2 | 16 |
-| 3 | 9 |
-| 5 | 4 |
-| 10 | 1 |
+| p | f | per_fold_gb | Batch Size |
+|---|---|-------------|------------|
+| 1 | 1 | 0.1463 | 35 |
+| 2 | 2 | 0.1634 | 31 |
+| 3 | 3 | 0.1805 | 28 |
+| 5 | 5 | 0.2147 | 24 |
+| 10 | 10 | 0.3002 | 17 |
 
 ### 24GB GPU (e.g., RTX 4090)
-Numerator = 6 × 24 = 144
+Budget = 0.65 x 24 = 15.6 GB
 
-| p | Batch Size |
-|---|------------|
-| 1 | 144 |
-| 2 | 50 |
-| 3 | 27 |
-| 5 | 12 |
-| 10 | 4 |
+| p | f | per_fold_gb | Batch Size |
+|---|---|-------------|------------|
+| 1 | 1 | 0.1463 | 106 |
+| 2 | 2 | 0.1634 | 95 |
+| 3 | 3 | 0.1805 | 86 |
+| 5 | 5 | 0.2147 | 72 |
+| 10 | 10 | 0.3002 | 51 |
 
 ### 48GB GPU (e.g., A40, RTX 6000 Ada)
-Numerator = 6 × 48 = 288
+Budget = 0.65 x 48 = 31.2 GB
 
-| p | Batch Size |
-|---|------------|
-| 1 | 288 |
-| 2 | 101 |
-| 3 | 55 |
-| 5 | 25 |
-| 10 | 9 |
+| p | f | per_fold_gb | Batch Size |
+|---|---|-------------|------------|
+| 1 | 1 | 0.1463 | 213 |
+| 2 | 2 | 0.1634 | 190 |
+| 3 | 3 | 0.1805 | 172 |
+| 5 | 5 | 0.2147 | 145 |
+| 10 | 10 | 0.3002 | 103 |
 
 ### 80GB GPU (e.g., A100 80GB, H100)
-Numerator = 6 × 80 = 480
+Budget = 0.65 x 80 = 52.0 GB
 
-| p | Batch Size |
-|---|------------|
-| 1 | 480 |
-| 2 | 169 |
-| 3 | 92 |
-| 5 | 42 |
-| 10 | 15 |
+| p | f | per_fold_gb | Batch Size |
+|---|---|-------------|------------|
+| 1 | 1 | 0.1463 | 355 |
+| 2 | 2 | 0.1634 | 318 |
+| 3 | 3 | 0.1805 | 288 |
+| 5 | 5 | 0.2147 | 242 |
+| 10 | 10 | 0.3002 | 173 |
 
 ### Effect of Confounders on 80GB GPU
 
-| p | VIX (1.0x) | macro5 (0.71x) | all10 (0.53x) |
-|---|-----------|----------------|---------------|
-| 1 | 480 | 342 | 252 |
-| 2 | 169 | 120 | 89 |
-| 5 | 42 | 30 | 22 |
-| 10 | 15 | 10 | 7 |
+| p | n_c=1 (f=p) | n_c=5 (f=5p) | n_c=10 (f=10p) |
+|---|-------------|--------------|----------------|
+| 1 | 355 | 242 | 173 |
+| 2 | 318 | 173 | 110 |
+| 5 | 242 | 93 | 52 |
+| 10 | 173 | 52 | 28 |
 
 ## Implementation
 
 ```python
-def _get_batch_size_for_p(p: int, n_folds: int, n_confounders: int = 1, verbose: bool = False) -> int:
-    """Get batch size for a given lag order p using size-based heuristic."""
+def _get_batch_size_for_p(
+    p: int, n_folds: int, n_confounders: int = 1,
+    target_vram_pct: float = 0.65, verbose: bool = False,
+) -> int:
+    """Get batch size using empirical linear VRAM model."""
     _, total_vram_gb, _ = _get_vram_usage()
-
-    # Scale factor: 6 * VRAM (calibrated: 480 for 80GB)
-    numerator = 6 * total_vram_gb
-
-    # Scale down for more confounders: (9 + n_confounders) captures total variable load
-    confounder_scale = 10.0 / (9 + n_confounders)
-    batch_size = int(confounder_scale * numerator / (p ** 1.5))
-    batch_size = min(batch_size, n_folds)
-    batch_size = max(1, batch_size)
-
+    f = n_confounders * p
+    per_fold_gb = 0.0171 * f + 0.1292
+    vram_budget = target_vram_pct * total_vram_gb
+    batch_size = int(vram_budget / per_fold_gb)
+    batch_size = max(1, min(batch_size, n_folds))
     return batch_size
 ```
 
@@ -156,24 +138,20 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --n-days 1500 --verbose
 
 Expected output on 80GB GPU (VIX):
 ```
-  Phase 3: Running batched TabPFN predictions...
-    p=1: batch_size = 1.00x * 480/1^1.5 = 480 → capped to 228 (n_confounders=1)
-    p=2: batch_size = 1.00x * 480/2^1.5 = 169 → capped to 169 (n_confounders=1)
-    p=3: batch_size = 1.00x * 480/3^1.5 = 92 → capped to 92 (n_confounders=1)
-    ...
-    p=10: batch_size = 1.00x * 480/10^1.5 = 15 → capped to 15 (n_confounders=1)
+    p=1: f=1, per_fold=0.1463 GB, budget=52.0 GB (65% of 80 GB) -> batch=355 (n_folds=228)
+    p=5: f=5, per_fold=0.2147 GB, budget=52.0 GB (65% of 80 GB) -> batch=242 (n_folds=228)
+    p=10: f=10, per_fold=0.3002 GB, budget=52.0 GB (65% of 80 GB) -> batch=173 (n_folds=228)
 ```
 
 ## Tuning
 
-If you experience OOM errors, reduce the coefficient:
+Adjust `target_vram_pct` to control VRAM usage:
 ```python
-numerator = 4.5 * total_vram_gb  # More conservative
-```
+# More conservative (less VRAM usage)
+result = fit_oraclevarx_tabpfn(..., target_vram_pct=0.50)
 
-If you want to be more aggressive:
-```python
-numerator = 7.5 * total_vram_gb  # Use more VRAM
+# More aggressive (faster, uses more VRAM)
+result = fit_oraclevarx_tabpfn(..., target_vram_pct=0.80)
 ```
 
 ## Probe Mode (`--probe`)
