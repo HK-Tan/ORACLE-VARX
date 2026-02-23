@@ -183,9 +183,14 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show -
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --no-show --verbose
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --no-show --verbose
 
+# Debug run example: p=1..3 with CPU Phase 4 OLS
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --p-max 3 --phase4-ols-device cpu --no-show --verbose
+
 # Just probing VRAM behaviors
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
 ```
+
+Note: There is no `--p-list` option in this script. Lag orders are always run as the inclusive range `p=1..p_max`.
 
 ## 7. CLI Reference
 
@@ -235,6 +240,8 @@ Runs ORACLE-VARX with TabPFN as the first-stage learner (GPU required).
 | `--name` | str | auto | Experiment name |
 | `--no-show` | flag | — | Don't display plots |
 | `--verbose` | flag | — | Print detailed progress |
+| `--probe` | flag | — | Probe mode: run 1 fold per p to test VRAM usage (no results saved) |
+| `--phase4-ols-device` | str | `cpu` | Device for Phase 4 batched OLS (`cpu` or `cuda`) |
 
 ## 8. Output Structure
 
