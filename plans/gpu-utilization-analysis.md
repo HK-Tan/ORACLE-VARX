@@ -1,129 +1,81 @@
 # GPU Utilization Analysis: TabPFN Batch Size Formula
 
+Date: 2026-02-23
+
 ## Probe Data Summary
 
-Four probe runs across 2 GPUs and 3 confounder configs:
+T-prediction probes on A100 80 GB across 3 confounder presets:
 
-| Run | GPU | VRAM | n_confounders | n_features = n_c * p |
-|-----|-----|------|---------------|---------------------|
-| VIX/A6000 | RTX A6000 | 48 GB | 1 | 1–10 |
-| VIX/A100 | A100 80GB | 80 GB | 1 | 1–10 |
-| macro5/A100 | A100 80GB | 80 GB | 5 | 5–50 |
-| all10/A6000 | RTX A6000 | 48 GB | 10 | 10–70 |
+| Run | GPU | VRAM | n_c | p range | probe formula |
+|-----|-----|------|----:|--------:|:--------------|
+| VIX | A100 80GB | 80 GB | 1 | 1–10 | `6*VRAM/(n_c*p^1.5)` |
+| macro5 | A100 80GB | 80 GB | 5 | 1–10 | `6*VRAM/(n_c*p^1.5)` |
+| all10 | A100 80GB | 80 GB | 10 | 1–2 (partial) | `6*VRAM/(n_c*p^1.5)` |
 
-## Per-Fold VRAM Cost (torch peak reserved / batch_size)
+The probe measures the **T prediction** (9×p outputs per fold), which is the
+binding VRAM constraint — larger than Y prediction (9 outputs per fold).
 
-| f (features) | VIX/A6000 | VIX/A100 | macro5/A100 | all10/A6000 |
-|-------------|-----------|----------|-------------|-------------|
-| 1 | 0.093 | 0.093 | — | — |
-| 2 | 0.093 | 0.093 | — | — |
-| 3 | 0.093 | 0.094 | — | — |
-| 4 | 0.180 | 0.178 | — | — |
-| 5 | 0.180 | 0.155 | 0.154 | — |
-| 6 | 0.158 | 0.178 | — | — |
-| 7 | 0.233 | 0.232 | — | — |
-| 8 | 0.233 | 0.233 | — | — |
-| 9 | 0.240 | 0.229 | — | — |
-| 10 | 0.300 | 0.300 | 0.298 | 0.299 |
-| 15 | — | — | 0.343 | — |
-| 20 | — | — | 0.405 | 0.406 |
-| 25 | — | — | 0.513 | — |
-| 30 | — | — | 0.570 | 0.572 |
-| 35 | — | — | 0.678 | — |
-| 40 | — | — | 0.787 | 0.789 |
-| 45 | — | — | 0.833 | — |
-| 50 | — | — | 0.940 | 0.954 |
-| 60 | — | — | — | 1.120 |
-| 70 | — | — | — | 1.325 |
+## Per-Fold VRAM Cost (peak_alloc / batch_size)
 
-**Key observation**: Per-fold cost is consistent across GPUs for the same feature count. This means per-fold cost is a GPU-independent quantity — only `f = n_confounders * p` matters.
+| p | VIX (n_c=1) | macro5 (n_c=5) | all10 (n_c=10) | ratio 5/1 | ratio 10/5 |
+|--:|------------:|---------------:|---------------:|----------:|-----------:|
+| 1 | 0.081 | 0.123 | 0.204 | 1.52 | 1.66 |
+| 2 | 0.163 | 0.409 | 0.656 | 2.51 | 1.60 |
+| 3 | 0.243 | 0.733 | — | 3.01 | — |
+| 4 | 0.487 | 1.300 | — | 2.67 | — |
+| 5 | 0.607 | 2.025 | — | 3.34 | — |
+| 6 | 0.728 | 2.667 | — | 3.66 | — |
+| 7 | 1.132 | 3.680 | — | 3.25 | — |
+| 8 | 1.290 | 4.850 | — | 3.76 | — |
+| 9 | 1.447 | 5.800 | — | 4.01 | — |
+| 10 | 2.007 | 7.233 | — | 3.60 | — |
+
+**Key finding**: The ratio 5/1 averages ~3.4, not 5.0. This means per-fold
+cost scales as **n_c^0.75** (since 5^0.75 = 3.34), not n_c^1.
+
+The p exponent from VIX data (log-log slope across p=1..10) is ~1.4,
+consistent with p^1.5 as a slightly conservative model.
 
 ## Fitted Model
 
-Power-law fit yields exponent ~1.03, confirming **linear scaling**:
-
 ```
-per_fold_gb = 0.0171 * f + 0.1292
+batch = floor(11 * VRAM / (n_c^0.75 * p^1.5))
 ```
 
-where `f = n_confounders * p`.
+### How the coefficient (11) was determined
 
-This is a **conservative upper bound** that covers 100% of all 37 data points (never underestimates). The two binding constraints are at f=10 (per_fold=0.300) and f=70 (per_fold=1.325).
+For each probe point, compute the `a` that would hit 75% utilization (60 GB
+on A100):
 
-### Staircase at low f
-
-For f=1,2,3 the actual cost is ~0.093 GB/fold but the formula predicts ~0.146. This ~57% overestimate at low f is acceptable because:
-1. Low-f cases have abundant batch capacity anyway (often capped to n_folds)
-2. Being conservative at low f prevents OOM from CUDA workspace ratcheting
-
-## Proposed Formula
-
-```python
-def _get_batch_size_for_p(p, n_folds, n_confounders=1, target_vram_pct=0.65, verbose=False):
-    _, total_vram_gb, _ = _get_vram_usage()
-
-    # Per-fold VRAM cost: linear in total features (empirically fitted)
-    f = n_confounders * p
-    per_fold_gb = 0.0171 * f + 0.1292
-
-    # VRAM budget: target fraction of total VRAM
-    vram_budget = target_vram_pct * total_vram_gb
-
-    batch_size = int(vram_budget / per_fold_gb)
-    batch_size = max(1, min(batch_size, n_folds))
-    return batch_size
+```
+a_75 = 0.75 * n_c^0.75 * p^1.5 / per_fold
 ```
 
-## Predicted Utilization
+| Preset | p=4 | p=7 | p=10 | min a |
+|--------|----:|----:|-----:|------:|
+| VIX (n_c=1) | 12.3 | 12.3 | 11.8 | 11.8 |
+| macro5 (n_c=5) | 15.4 | 12.6 | 11.0 | 11.0 |
 
-### VIX (1 confounder) at 65% target
+The binding constraint is macro5 p=10 at a=11.0. Using `a=11` keeps all
+observed data points at or below 75%.
 
-| p | f | per_fold | A6000 batch | A6000 util% | A100 batch | A100 util% |
-|---|---|----------|-------------|-------------|------------|------------|
-| 1 | 1 | 0.146 | 213 | 65% | 228 (cap) | 42% |
-| 2 | 2 | 0.163 | 190 | 65% | 228 (cap) | 47% |
-| 3 | 3 | 0.181 | 172 | 65% | 228 (cap) | 51% |
-| 5 | 5 | 0.215 | 145 | 65% | 228 (cap) | 61% |
-| 7 | 7 | 0.249 | 125 | 65% | 208 | 65% |
-| 10 | 10 | 0.300 | 103 | 65% | 173 | 65% |
+### Previous formula (deprecated)
 
-Note: VIX with 228 folds hits the cap for low p on A100. Utilization undershoots vs target when capped.
+The old linear model `per_fold = 0.0171 * f + 0.1292` (where `f = n_c * p`)
+was calibrated from **Y prediction** probe data, which understated VRAM usage.
+The T prediction probe revealed that per-fold cost scales non-linearly with
+both p and n_c, requiring the power-law model.
 
-### macro5 (5 confounders) at 65% target
+## Predicted Utilization (A100 80 GB)
 
-| p | f | per_fold | A100 batch | A100 util% |
-|---|---|----------|------------|------------|
-| 1 | 5 | 0.215 | 228 (cap) | 61% |
-| 3 | 15 | 0.386 | 134 | 65% |
-| 5 | 25 | 0.557 | 93 | 65% |
-| 7 | 35 | 0.728 | 71 | 65% |
-| 10 | 50 | 0.984 | 52 | 64% |
+See `tabpfn-predicted-utilization.md` for full tables across all GPUs.
 
-### all10 (10 confounders) at 65% target
+### Quick reference — worst cases
 
-| p | f | per_fold | A6000 batch | A6000 util% | A100 batch | A100 util% |
-|---|---|----------|-------------|-------------|------------|------------|
-| 1 | 10 | 0.300 | 103 | 65% | 173 | 65% |
-| 3 | 30 | 0.642 | 48 | 64% | 80 | 64% |
-| 5 | 50 | 0.984 | 31 | 64% | 52 | 64% |
-| 7 | 70 | 1.326 | 23 | 64% | 39 | 65% |
-| 10 | 100 | 1.839 | 16 | 61% | 28 | 64% |
+| Preset | worst p | batch | est_peak (GB) | util % |
+|--------|--------:|------:|--------------:|-------:|
+| VIX (n_c=1) | 10 | 27 | 54.2 | 68 |
+| macro5 (n_c=5) | 10 | 8 | 57.9 | 72 |
+| all10 (n_c=10)\* | 7 | 8 | 49.5 | 62 |
 
-## CUDA Workspace Consideration
-
-Driver VRAM (nvidia-smi) includes a CUDA library workspace that ratchets up:
-- A6000: ~22 GB (set by first large forward pass)
-- A100: ~22 GB for VIX, ~54 GB for macro5
-
-This workspace is NOT tracked by PyTorch and cannot be freed without process restart. Our formula uses **torch peak reserved** (PyTorch-tracked) as the cost metric, and targets 65% of **total VRAM**. Since the workspace is roughly proportional to the PyTorch allocation peak, this provides an implicit safety margin.
-
-## Old vs New Formula Comparison
-
-| Aspect | Old formula | New formula |
-|--------|------------|-------------|
-| Core | `480 / p^1.5` | `0.65 * VRAM / (0.0171*f + 0.1292)` |
-| Confounder scaling | Linear: `10/(9+n_c)` | Built into `f = n_c * p` |
-| GPU scaling | `6 * VRAM_GB` (linear) | `0.65 * VRAM_GB` (linear) |
-| p scaling | `p^-1.5` (too aggressive) | `~p^-1` (matches data) |
-| all10 p=7 A6000 | 8 folds → 96% VRAM, crawling | 23 folds → 64% VRAM, fast |
-| VIX p=10 A100 | 15 folds → 6% util | 173 folds → 65% util |
+\* extrapolated

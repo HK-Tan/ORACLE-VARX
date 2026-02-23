@@ -136,11 +136,13 @@ def _get_batch_size_for_p(
 ) -> int:
     """Get batch size for a given lag order p using empirical scaling formula.
 
-    Batch size = floor(6 * total_vram_gb / (n_confounders * p^1.5)).
+    Batch size = floor(11 * total_vram_gb / (n_confounders^0.75 * p^1.5)).
 
-    Starting-point formula calibrated from VIX runs on A100 80 GB. The
-    coefficient (6) and exponent (1.5) will be refined after probing all
-    presets.  target_vram_pct is currently unused but kept for future tuning.
+    Calibrated from T-prediction probe data on A100 80 GB across VIX (n_c=1)
+    and macro5 (n_c=5) presets. Per-fold VRAM scales sub-linearly with
+    n_confounders (~n_c^0.75), and as p^1.5. The coefficient (11) targets
+    ~72% peak utilization in the worst case.  target_vram_pct is currently
+    unused but kept for future tuning.
 
     Args:
         p: Lag order (1 to p_max).
@@ -154,13 +156,13 @@ def _get_batch_size_for_p(
     """
     _, total_vram_gb, _ = _get_vram_usage()
 
-    batch_size = int(6 * total_vram_gb / (n_confounders * p ** 1.5))
+    batch_size = int(11 * total_vram_gb / (n_confounders ** 0.75 * p ** 1.5))
     batch_size = min(batch_size, n_folds)
     batch_size = max(1, batch_size)
 
     if verbose:
         print(f"    p={p}: n_c={n_confounders}, "
-              f"6*{total_vram_gb:.0f}/({n_confounders}*{p}^1.5) "
+              f"11*{total_vram_gb:.0f}/({n_confounders}^0.75*{p}^1.5) "
               f"-> batch={batch_size} (n_folds={n_folds})")
 
     return batch_size
