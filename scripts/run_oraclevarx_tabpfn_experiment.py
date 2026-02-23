@@ -105,6 +105,7 @@ def main(
     show_plots: bool = True,
     verbose: bool = False,
     probe: bool = False,
+    phase4_ols_device: str = "cpu",
 ):
     """Run ORACLE-VARX experiment with TabPFN.
 
@@ -117,6 +118,7 @@ def main(
         experiment_name: Name for the experiment. If None, auto-generated.
         show_plots: Whether to display plots interactively.
         verbose: Whether to print detailed progress.
+        phase4_ols_device: Device for Phase 4 batched OLS ('cpu' or 'cuda').
     """
     import pandas as pd
     import numpy as np
@@ -213,6 +215,7 @@ def main(
     print(f"    p_max: {p_max}")
     print(f"    alpha_grid: {alpha_grid}")
     print(f"    learner: TabPFN (batched GPU)")
+    print(f"    phase4_ols_device: {phase4_ols_device}")
     print(f"    Expected output days: {n_test_days}")
 
     start_time = time.perf_counter()
@@ -230,6 +233,7 @@ def main(
         device='cuda',
         verbose=verbose,
         probe=probe,
+        phase4_ols_device=phase4_ols_device,
     )
     elapsed = time.perf_counter() - start_time
 
@@ -431,6 +435,8 @@ Example:
     parser.add_argument("--probe", action="store_true",
                         help="Probe mode: run 1 fold per p with batch_size=1 to test VRAM usage. "
                              "No results are saved.")
+    parser.add_argument("--phase4-ols-device", type=str, default="cpu", choices=["cpu", "cuda"],
+                        help="Device for Phase 4 batched OLS (default: cpu).")
 
     args = parser.parse_args()
 
@@ -465,4 +471,5 @@ Example:
             show_plots=not args.no_show,
             verbose=args.verbose,
             probe=args.probe,
+            phase4_ols_device=args.phase4_ols_device,
         )

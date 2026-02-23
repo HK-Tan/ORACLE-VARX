@@ -178,19 +178,31 @@ from src.models.var_pytorch import rolling_alpha_selection
 def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                     n_total_test_days, n_assets, p_max,
                     ols_window, batch_chunk_size, lookback,
-                    dtype_str, verbose):
-    """Run Phase 4 OLS in a subprocess with a fresh CUDA context.
+                    dtype_str, verbose, ols_device):
+    """Run Phase 4 OLS.
 
     After TabPFN's heavy GPU usage in Phase 3 (58.5 GB peak, 10 rounds of
     allocate/deallocate), the CUDA context is degraded and cuBLAS/MAGMA
     operations fail with cudaErrorIllegalAddress. Since PyTorch has no way
     to fully reset the CUDA context within a process, we run OLS in a
-    spawned subprocess that gets a completely fresh CUDA initialization.
+    spawned subprocess that gets a completely fresh CUDA initialization when
+    using GPU OLS.
     """
     import torch
     from src.modules.batch_utils import batched_ols
 
-    dev = torch.device('cuda:0')
+    ols_device = str(ols_device).lower()
+    if ols_device not in {"cuda", "cpu"}:
+        raise ValueError(
+            f"ols_device must be 'cuda' or 'cpu', got {ols_device!r}"
+        )
+    if ols_device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("Phase 4 OLS requested CUDA but no GPU is available.")
+        dev = torch.device("cuda:0")
+    else:
+        dev = torch.device("cpu")
+
     dtype = getattr(torch, dtype_str)  # e.g. 'float32' → torch.float32
 
     theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
@@ -447,6 +459,7 @@ def fit_oraclevarx_tabpfn(
     verbose: bool = False,
     target_vram_pct: float = 0.65,
     probe: bool = False,
+    phase4_ols_device: str = "cuda",
 ) -> Optional[ORACLEVARXResult]:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
 
@@ -474,6 +487,8 @@ def fit_oraclevarx_tabpfn(
             Targets ~60% torch utilization, leaving headroom for CUDA workspace.
         probe: If True, run 1 iteration per p with the real heuristic batch size
             to empirically test VRAM usage. Prints a summary table and returns None.
+        phase4_ols_device: Device for Phase 4 batched OLS ('cuda' or 'cpu').
+            Use 'cpu' to avoid CUDA linear algebra failures in OLS.
 
     Returns:
         ORACLEVARXResult with forecasts and coefficients, or None if probe=True.
@@ -507,6 +522,11 @@ def fit_oraclevarx_tabpfn(
         raise ValueError(f"Need at least {lookback + 1} days, got {n_days}")
     if validation_days < 1:
         raise ValueError(f"validation_days must be >= 1, got {validation_days}")
+    phase4_ols_device = str(phase4_ols_device).lower()
+    if phase4_ols_device not in {"cuda", "cpu"}:
+        raise ValueError(
+            f"phase4_ols_device must be 'cuda' or 'cpu', got {phase4_ols_device!r}"
+        )
 
     n_total_test_days = n_days - lookback
     n_output_days = n_total_test_days - validation_days
@@ -899,21 +919,32 @@ def fit_oraclevarx_tabpfn(
         return None
 
     # =========================================================================
-    # Phase 4: Batched OLS in subprocess (fresh CUDA context)
+    # Phase 4: Batched OLS
     # =========================================================================
-    print("  Phase 4: Running batched OLS (subprocess for fresh CUDA)...")
+    if phase4_ols_device == "cuda":
+        print("  Phase 4: Running batched OLS on GPU (spawned subprocess)...")
+    else:
+        print("  Phase 4: Running batched OLS on CPU...")
 
     ols_window = config.ols_window
     dtype_str = str(dtype).split('.')[-1]  # 'torch.float32' → 'float32'
 
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(1) as pool:
-        theta_np, SE_np = pool.apply(
-            _run_ols_phase4,
-            (R_Y_all, R_T_all, first_residual_row,
-             n_total_test_days, n_assets, p_max,
-             ols_window, config.batch_chunk_size, lookback,
-             dtype_str, verbose)
+    if phase4_ols_device == "cuda":
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(1) as pool:
+            theta_np, SE_np = pool.apply(
+                _run_ols_phase4,
+                (R_Y_all, R_T_all, first_residual_row,
+                 n_total_test_days, n_assets, p_max,
+                 ols_window, config.batch_chunk_size, lookback,
+                 dtype_str, verbose, phase4_ols_device)
+            )
+    else:
+        theta_np, SE_np = _run_ols_phase4(
+            R_Y_all, R_T_all, first_residual_row,
+            n_total_test_days, n_assets, p_max,
+            ols_window, config.batch_chunk_size, lookback,
+            dtype_str, verbose, phase4_ols_device
         )
 
     # Convert results to GPU tensors for Phase 5
