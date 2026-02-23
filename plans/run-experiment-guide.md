@@ -188,6 +188,9 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --p-max 3 -
 
 # Just probing VRAM behaviors
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
+
+# Skip coefficient heatmap refit (faster, no extra TabPFN cold-start)
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose --skip-heatmap
 ```
 
 Note: There is no `--p-list` option in this script. Lag orders are always run as the inclusive range `p=1..p_max`.
@@ -242,6 +245,7 @@ Runs ORACLE-VARX with TabPFN as the first-stage learner (GPU required).
 | `--verbose` | flag | — | Print detailed progress |
 | `--probe` | flag | — | Probe mode: run 1 fold per p to test VRAM usage (no results saved) |
 | `--phase4-ols-device` | str | `cpu` | Device for Phase 4 batched OLS (`cpu` or `cuda`) |
+| `--skip-heatmap` | flag | — | Skip coefficient heatmap refit (avoids slow TabPFN refit) |
 
 ## 8. Output Structure
 
