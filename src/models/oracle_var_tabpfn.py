@@ -829,17 +829,22 @@ def fit_oraclevarx_tabpfn(
 
     ols_window = config.ols_window
 
-    # Initialize storage
-    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=dev, dtype=dtype)
-    theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=dev, dtype=dtype)
-    SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=dev, dtype=dtype)
+    # OLS runs on CPU to avoid CUDA context issues after heavy Phase 3 TabPFN.
+    # Same unfold→batched_ols pattern works on GPU in other models (dml_pytorch,
+    # var_pytorch, acle_var) where Phase 3 is CPU-based. After TabPFN's heavy
+    # GPU usage (58.5 GB peak), the CUDA state causes cuBLAS errors. CPU OLS
+    # is <1s total vs Phase 3's 3227s — zero performance impact.
+    cpu = torch.device('cpu')
+    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=cpu, dtype=dtype)
+    theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=cpu, dtype=dtype)
+    SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=cpu, dtype=dtype)
 
     for p in range(1, p_max + 1):
         if p not in R_Y_all:
             continue
 
-        R_Y = torch.from_numpy(R_Y_all[p]).to(device=dev, dtype=dtype)
-        R_T = torch.from_numpy(R_T_all[p]).to(device=dev, dtype=dtype)
+        R_Y = torch.from_numpy(R_Y_all[p]).to(dtype=dtype)   # stays on CPU
+        R_T = torch.from_numpy(R_T_all[p]).to(dtype=dtype)   # stays on CPU
         first_row = first_residual_row[p]
         n_residual_rows = R_Y.shape[0]
         n_treatments = n_assets * p
@@ -885,6 +890,11 @@ def fit_oraclevarx_tabpfn(
             if verbose:
                 print(f"    p={p}: OLS failed ({e})")
             continue
+
+    # Move OLS results to GPU for Phase 5 (DML forecasting)
+    theta_all = theta_all.to(device=dev)
+    SE_all = SE_all.to(device=dev)
+    forecasts_all = forecasts_all.to(device=dev)
 
     # =========================================================================
     # Phase 5: Generate forecasts using exact E[Y|W] and E[T|W]
