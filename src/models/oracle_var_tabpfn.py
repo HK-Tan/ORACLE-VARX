@@ -568,7 +568,7 @@ def fit_oraclevarx_tabpfn(
 
     def _vram_monitor_thread():
         """Background thread that prints VRAM every 60 seconds."""
-        interval = 60.0
+        interval = 20.0
         while not vram_monitor_stop.wait(timeout=interval):
             used, total, pct = _get_vram_usage()
             mem = _get_torch_cuda_memory_stats()
@@ -627,15 +627,16 @@ def fit_oraclevarx_tabpfn(
                 Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
                 X_tests_group = [folds_p[i]['X_test'] for i in fold_indices]
 
-                # Run batched TabPFN for this group
-                Y_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_tests_group, effective_batch_size)
+                # Run T first — it has 9p outputs per fold (vs Y's 9), so it's
+                # the binding VRAM constraint and what --probe should measure.
+                T_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_tests_group, effective_batch_size)
 
                 if probe:
                     # One batch call is enough to measure VRAM — skip the rest
                     break
 
                 _clear_gpu_memory()
-                T_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_tests_group, effective_batch_size)
+                Y_preds_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_tests_group, effective_batch_size)
                 _clear_gpu_memory()
 
                 # Store results back to original fold indices
@@ -683,6 +684,9 @@ def fit_oraclevarx_tabpfn(
             print(f"    PROBE p={p}: PASS (batch_size={effective_batch_size})")
             print(f"      Controls features: {n_confounders * p} "
                   f"({n_confounders} confounders x {p} lags)")
+            print(f"      T outputs per fold: {n_treatments} "
+                  f"(= 9 assets x {p} lags), "
+                  f"total T batch items: {effective_batch_size * n_treatments}")
             print(f"      VRAM after inference (driver used): "
                   f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
             print(f"      Torch memory now (alloc/reserved): "
