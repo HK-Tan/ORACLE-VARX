@@ -106,6 +106,7 @@ def main(
     verbose: bool = False,
     probe: bool = False,
     phase4_ols_device: str = "cpu",
+    skip_heatmap: bool = False,
 ):
     """Run ORACLE-VARX experiment with TabPFN.
 
@@ -119,6 +120,7 @@ def main(
         show_plots: Whether to display plots interactively.
         verbose: Whether to print detailed progress.
         phase4_ols_device: Device for Phase 4 batched OLS ('cpu' or 'cuda').
+        skip_heatmap: Skip coefficient heatmap refit (avoids slow TabPFN refit).
     """
     import pandas as pd
     import numpy as np
@@ -358,82 +360,55 @@ def main(
     print(f"  Saved: {strategy_plot_raw_path}")
 
     # Plot 4+: Per-p coefficient evolution for target days (TabPFN refit)
-    targets = get_target_days(result)
-    target_tasks = []
-    for label, result_day_idx in targets:
-        abs_day_idx = lookback + validation_days + result_day_idx
-        p_star = int(result.p_optimal[result_day_idx].item())
-        date_str = result.dates[result_day_idx]
-        target_tasks.append(
-            {
-                "label": label,
-                "result_day_idx": result_day_idx,
-                "abs_day_idx": abs_day_idx,
-                "p_star": p_star,
-                "date_str": date_str,
-            }
-        )
+    if skip_heatmap:
+        print("  Skipping coefficient heatmaps (--skip-heatmap)")
+    else:
+        targets = get_target_days(result)
+        Y_etf_np = Y_etf.detach().cpu().numpy().astype(np.float32, copy=False)
+        W_np = W.detach().cpu().numpy().astype(np.float32, copy=False)
 
-    print("  Launching 2 spawned GPU workers for coefficient refit (one per target day)...")
-    for task in target_tasks:
-        print(
-            f"    dispatch: {task['label']} ({task['date_str']}), "
-            f"abs_day_idx={task['abs_day_idx']}, p*={task['p_star']}"
-        )
-
-    Y_etf_np = Y_etf.detach().cpu().numpy().astype(np.float32, copy=False)
-    W_np = W.detach().cpu().numpy().astype(np.float32, copy=False)
-
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=2) as pool:
-        async_results = {}
-        for task in target_tasks:
-            label = task["label"]
-            async_results[label] = pool.apply_async(
-                refit_dml_coefficients_for_day_tabpfn_spawn_worker,
-                kwds={
-                    "label": label,
-                    "Y_np": Y_etf_np,
-                    "W_np": W_np,
-                    "day_idx": task["abs_day_idx"],
-                    "p_star": task["p_star"],
-                    "lookback": lookback,
-                    "asset_names": etf_tickers,
-                    "date": task["date_str"],
-                    "train_size": config.train_size,
-                    "device": "cuda",
-                },
-            )
-
+        print("  Running coefficient refit (fresh CUDA subprocess per day)...")
+        ctx = mp.get_context("spawn")
         per_p_payloads = {}
-        for task in target_tasks:
-            label = task["label"]
-            try:
-                payload = async_results[label].get()
-            except Exception:
-                print(
-                    f"  ERROR: spawned GPU coefficient refit failed for "
-                    f"{label} ({task['date_str']})."
+        for label, result_day_idx in targets:
+            abs_day_idx = lookback + validation_days + result_day_idx
+            p_star = int(result.p_optimal[result_day_idx].item())
+            date_str = result.dates[result_day_idx]
+            print(f"    refit: {label} ({date_str}), p*={p_star}")
+            with ctx.Pool(processes=1) as pool:
+                payload = pool.apply(
+                    refit_dml_coefficients_for_day_tabpfn_spawn_worker,
+                    kwds={
+                        "label": label,
+                        "Y_np": Y_etf_np,
+                        "W_np": W_np,
+                        "day_idx": abs_day_idx,
+                        "p_star": p_star,
+                        "lookback": lookback,
+                        "asset_names": etf_tickers,
+                        "date": date_str,
+                        "train_size": config.train_size,
+                        "device": "cuda",
+                    },
                 )
-                raise
+            # Pool destroyed here → worker process dies → CUDA context gone
             per_p_payloads[label] = payload
             print(
-                f"  completed: {label} worker_pid={payload['worker_pid']} "
+                f"    completed: {label} pid={payload['worker_pid']} "
                 f"time={payload['elapsed_seconds']:.1f}s"
             )
 
-    for task in target_tasks:
-        label = task["label"]
-        date_str = task["date_str"]
-        p_star = task["p_star"]
-        per_p_coefs = unpack_per_p_coefficients(per_p_payloads[label])
-        save_path = experiment_dir / f"coefficient_evolution_{label}.png"
-        plot_coefficient_evolution_per_p(
-            per_p_coefs,
-            title=f"ORACLE-VARX ({conf_label}/TabPFN): Coefficient Evolution p*={p_star} ({date_str})",
-            save_path=str(save_path), show_plot=show_plots,
-        )
-        print(f"  Saved: {save_path}")
+        for label, result_day_idx in targets:
+            date_str = result.dates[result_day_idx]
+            p_star = int(result.p_optimal[result_day_idx].item())
+            per_p_coefs = unpack_per_p_coefficients(per_p_payloads[label])
+            save_path = experiment_dir / f"coefficient_evolution_{label}.png"
+            plot_coefficient_evolution_per_p(
+                per_p_coefs,
+                title=f"ORACLE-VARX ({conf_label}/TabPFN): Coefficient Evolution p*={p_star} ({date_str})",
+                save_path=str(save_path), show_plot=show_plots,
+            )
+            print(f"  Saved: {save_path}")
 
     # =========================================================================
     # Step 5: Save Results
@@ -499,6 +474,8 @@ Example:
                              "No results are saved.")
     parser.add_argument("--phase4-ols-device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for Phase 4 batched OLS (default: cpu).")
+    parser.add_argument("--skip-heatmap", action="store_true",
+                        help="Skip coefficient heatmap refit (avoids slow TabPFN refit after main run)")
 
     args = parser.parse_args()
 
@@ -534,4 +511,5 @@ Example:
             verbose=args.verbose,
             probe=args.probe,
             phase4_ols_device=args.phase4_ols_device,
+            skip_heatmap=args.skip_heatmap,
         )
