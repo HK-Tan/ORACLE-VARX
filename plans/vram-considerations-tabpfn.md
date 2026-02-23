@@ -1,87 +1,97 @@
 # VRAM Considerations for Batched TabPFN
 
-## Batch Size Heuristic
+Date: 2026-02-23
 
-After extensive testing, we use an **empirical linear VRAM model** rather than runtime VRAM probing. The probing approach proved unreliable due to PyTorch memory caching and the difficulty of capturing TabPFN's full memory footprint (CUDA kernels, cuBLAS workspaces, attention buffers).
+## Batch Size Formula
 
-**Formula:**
 ```
-batch_size = floor(target_vram_pct * VRAM_GB / per_fold_gb)
-per_fold_gb = 0.0171 * f + 0.1292
-f = n_confounders * p
+batch = floor(11 * VRAM_GB / (n_c^0.75 * p^1.5))
 ```
 
 Where:
 - `VRAM_GB`: Total GPU memory in GB
-- `f`: Total features = n_confounders x p
-- `per_fold_gb`: Predicted VRAM cost per fold (empirically fitted from 37 probe data points)
-- `target_vram_pct`: Fraction of total VRAM to use (default: 0.65)
+- `n_c`: Number of confounders (1 for VIX, 5 for macro5, 10 for all10)
+- `p`: Lag order (1 to p_max)
+
+Batch is capped at n_folds (228) and floored at 1.
 
 ## Why This Formula?
 
-### Linear Feature Scaling
-Per-fold VRAM cost scales linearly with `f = n_confounders * p`. Coefficients (0.0171, 0.1292) fitted from 37 probe data points across A6000/A100 GPUs with n_confounders in {1, 5, 10}. The fit is a conservative upper bound that never underestimates actual cost.
+### Sub-linear confounder scaling (n_c^0.75)
 
-### Unified Confounder Handling
-Unlike the old formula which had a separate `10/(9+n_confounders)` scaling factor, confounders are now naturally incorporated via `f = n_confounders * p`. No separate scaling needed.
+T-prediction probe data on A100 shows per-fold VRAM cost scales as n_c^0.75,
+not linearly. Going from n_c=1 to n_c=5, per-fold cost increases by ~3.4×
+(not 5×). The exponent 0.75 fits this: 5^0.75 = 3.34.
 
-### Default Target: 65% VRAM
-`target_vram_pct=0.65` targets ~60% actual torch utilization, leaving headroom for CUDA workspace overhead that PyTorch doesn't track.
+### Power-law lag scaling (p^1.5)
 
-## Expected Batch Sizes by GPU (VIX, n_confounders=1)
+Per-fold cost grows super-linearly with p. The exponent 1.5 is a conservative
+fit across the VIX probe data (actual log-log slope is ~1.4).
 
-### 8GB GPU (e.g., RTX 3070)
-Budget = 0.65 x 8 = 5.2 GB
+### Coefficient (11)
 
-| p | f | per_fold_gb | Batch Size |
-|---|---|-------------|------------|
-| 1 | 1 | 0.1463 | 35 |
-| 2 | 2 | 0.1634 | 31 |
-| 3 | 3 | 0.1805 | 28 |
-| 5 | 5 | 0.2147 | 24 |
-| 10 | 10 | 0.3002 | 17 |
+Chosen so the worst-case peak utilization across all (n_c, p) combinations
+stays under 75% of total VRAM. The binding constraint is macro5 p=10 on A100
+at ~72%.
 
-### 24GB GPU (e.g., RTX 4090)
-Budget = 0.65 x 24 = 15.6 GB
+### CUDA allocator
 
-| p | f | per_fold_gb | Batch Size |
-|---|---|-------------|------------|
-| 1 | 1 | 0.1463 | 106 |
-| 2 | 2 | 0.1634 | 95 |
-| 3 | 3 | 0.1805 | 86 |
-| 5 | 5 | 0.2147 | 72 |
-| 10 | 10 | 0.3002 | 51 |
+Requires `expandable_segments:True` (set automatically by the experiment
+script). Without this, PyTorch's default block allocator fragments CUDA
+memory across p values with different tensor shapes.
 
-### 48GB GPU (e.g., A40, RTX 6000 Ada)
-Budget = 0.65 x 48 = 31.2 GB
+## Expected Batch Sizes by GPU
 
-| p | f | per_fold_gb | Batch Size |
-|---|---|-------------|------------|
-| 1 | 1 | 0.1463 | 213 |
-| 2 | 2 | 0.1634 | 190 |
-| 3 | 3 | 0.1805 | 172 |
-| 5 | 5 | 0.2147 | 145 |
-| 10 | 10 | 0.3002 | 103 |
+### 80 GB GPU (A100, H100)
 
-### 80GB GPU (e.g., A100 80GB, H100)
-Budget = 0.65 x 80 = 52.0 GB
+| p | n_c=1 (VIX) | n_c=5 (macro5) | n_c=10 (all10) |
+|--:|------------:|---------------:|---------------:|
+| 1 | 228\* | 228\* | 156 |
+| 2 | 228\* | 93 | 55 |
+| 3 | 169 | 50 | 30 |
+| 4 | 110 | 32 | 19 |
+| 5 | 78 | 23 | 14 |
+| 6 | 59 | 17 | 10 |
+| 7 | 47 | 14 | 8 |
+| 8 | 38 | 11 | 6 |
+| 9 | 32 | 9 | 5 |
+| 10 | 27 | 8 | 4 |
 
-| p | f | per_fold_gb | Batch Size |
-|---|---|-------------|------------|
-| 1 | 1 | 0.1463 | 355 |
-| 2 | 2 | 0.1634 | 318 |
-| 3 | 3 | 0.1805 | 288 |
-| 5 | 5 | 0.2147 | 242 |
-| 10 | 10 | 0.3002 | 173 |
+\* capped at n_folds=228
 
-### Effect of Confounders on 80GB GPU
+### 48 GB GPU (A6000, RTX 6000 Ada)
 
-| p | n_c=1 (f=p) | n_c=5 (f=5p) | n_c=10 (f=10p) |
-|---|-------------|--------------|----------------|
-| 1 | 355 | 242 | 173 |
-| 2 | 318 | 173 | 110 |
-| 5 | 242 | 93 | 52 |
-| 10 | 173 | 52 | 28 |
+| p | n_c=1 (VIX) | n_c=5 (macro5) | n_c=10 (all10) |
+|--:|------------:|---------------:|---------------:|
+| 1 | 228\* | 157 | 93 |
+| 2 | 186 | 55 | 33 |
+| 3 | 101 | 30 | 18 |
+| 4 | 66 | 19 | 11 |
+| 5 | 47 | 14 | 8 |
+| 6 | 35 | 10 | 6 |
+| 7 | 28 | 8 | 5 |
+| 8 | 23 | 6 | 4 |
+| 9 | 19 | 5 | 3 |
+| 10 | 16 | 4 | 2 |
+
+\* capped at n_folds=228
+
+### 24 GB GPU (RTX 4090)
+
+| p | n_c=1 (VIX) | n_c=5 (macro5) | n_c=10 (all10) |
+|--:|------------:|---------------:|---------------:|
+| 1 | 228\* | 78 | 46 |
+| 2 | 93 | 27 | 16 |
+| 3 | 50 | 15 | 9 |
+| 4 | 33 | 9 | 5 |
+| 5 | 23 | 7 | 4 |
+| 6 | 17 | 5 | 3 |
+| 7 | 14 | 4 | 2 |
+| 8 | 11 | 3 | 2 |
+| 9 | 9 | 2 | 1 |
+| 10 | 8 | 2 | 1 |
+
+\* capped at n_folds=228
 
 ## Implementation
 
@@ -90,44 +100,47 @@ def _get_batch_size_for_p(
     p: int, n_folds: int, n_confounders: int = 1,
     target_vram_pct: float = 0.65, verbose: bool = False,
 ) -> int:
-    """Get batch size using empirical linear VRAM model."""
+    """Get batch size using empirical power-law VRAM model."""
     _, total_vram_gb, _ = _get_vram_usage()
-    f = n_confounders * p
-    per_fold_gb = 0.0171 * f + 0.1292
-    vram_budget = target_vram_pct * total_vram_gb
-    batch_size = int(vram_budget / per_fold_gb)
+    batch_size = int(11 * total_vram_gb / (n_confounders ** 0.75 * p ** 1.5))
     batch_size = max(1, min(batch_size, n_folds))
     return batch_size
 ```
 
+## Probe Mode (`--probe`)
+
+The `--probe` flag runs 1 iteration per p to empirically measure VRAM usage
+before committing to a full run. The probe measures **T prediction** (the
+binding VRAM constraint, with 9×p outputs per fold).
+
+```bash
+# Probe all presets
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all --probe
+
+# Probe a single preset
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --probe
+```
+
+Probe output includes per-p VRAM usage:
+
+```
+PROBE COMPLETE
+    p  features  status                  VRAM    time  suggested_batch
+  ------------------------------------------------------------------
+    1         5    PASS  12.8/80.0 GB (16%)  156.0s               96
+   10        50    PASS  23.5/80.0 GB (29%)  900.0s                3
+```
+
+If any p value OOMs, the probe reports it and continues to the next p.
+
 ## Why Not Automatic VRAM Probing?
 
-We tried several *automatic* probing approaches (measuring VRAM delta to compute
-batch size at runtime) that all failed. For *manual* probing before a full run,
-use the `--probe` flag (see below).
+Automatic probing at runtime proved unreliable:
+- `max_memory_allocated()` misses CUDA kernels, cuBLAS, and flash attention
+- `mem_get_info()` before/after suffers from PyTorch caching artifacts
+- Memory deltas can be negative due to reuse patterns
 
-### 1. `max_memory_allocated()` Approach
-Only tracks PyTorch tensor allocations, missing:
-- CUDA kernel memory
-- cuBLAS workspaces
-- Flash attention buffers
-- Other non-PyTorch allocations
-
-Result: Reported ~0.1 GB when actual usage was ~20 GB.
-
-### 2. `mem_get_info()` Before/After Approach
-Measures driver-level memory but suffers from:
-- PyTorch memory caching causing inconsistent baselines
-- Memory reuse patterns between batch=1 and batch=2
-- Could show batch=2 using LESS memory than batch=1
-
-Result: Negative per_batch costs, triggering fallback.
-
-### 3. Memory Increase Measurement with Warmup
-Better in theory, but still inconsistent due to:
-- `empty_cache()` not fully resetting state
-- Model weight loading affecting first measurement
-- Fragmentation effects
+The empirical formula with optional `--probe` verification is more robust.
 
 ## Verification
 
@@ -136,49 +149,9 @@ Run with `--verbose` to see batch sizes:
 python scripts/run_oraclevarx_tabpfn_experiment.py --n-days 1500 --verbose
 ```
 
-Expected output on 80GB GPU (VIX):
+Expected output on 80 GB GPU (VIX):
 ```
-    p=1: f=1, per_fold=0.1463 GB, budget=52.0 GB (65% of 80 GB) -> batch=355 (n_folds=228)
-    p=5: f=5, per_fold=0.2147 GB, budget=52.0 GB (65% of 80 GB) -> batch=242 (n_folds=228)
-    p=10: f=10, per_fold=0.3002 GB, budget=52.0 GB (65% of 80 GB) -> batch=173 (n_folds=228)
+    p=1: n_c=1, 11*80/(1^0.75*1^1.5) -> batch=228 (n_folds=228)
+    p=5: n_c=1, 11*80/(1^0.75*5^1.5) -> batch=78 (n_folds=228)
+    p=10: n_c=1, 11*80/(1^0.75*10^1.5) -> batch=27 (n_folds=228)
 ```
-
-## Tuning
-
-Adjust `target_vram_pct` to control VRAM usage:
-```python
-# More conservative (less VRAM usage)
-result = fit_oraclevarx_tabpfn(..., target_vram_pct=0.50)
-
-# More aggressive (faster, uses more VRAM)
-result = fit_oraclevarx_tabpfn(..., target_vram_pct=0.80)
-```
-
-## Probe Mode (`--probe`)
-
-When using more confounders, the heuristic formula may not be accurate enough for
-your GPU. The `--probe` flag runs 1 iteration per p with the real heuristic batch
-size to empirically test VRAM usage before committing to a full run. No results
-are saved. Probe shares the exact same grouped code path as non-probe (including
-`folds_by_test_size` grouping and `fit_predict_batch` sub-batching).
-
-```bash
-# Probe macro5 on your GPU
-python scripts/run_oraclevarx_tabpfn_experiment.py --confounders macro5 --probe
-
-# Probe all10 with less data for faster testing
-python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --probe --n-days 1500
-```
-
-Probe output includes per-p VRAM usage and suggested batch sizes:
-
-```
-PROBE COMPLETE
-    p  features  status                  VRAM    time  suggested_batch
-  ------------------------------------------------------------------
-    1         5    PASS  12.3/80.0 GB (15%)    2.3s               96
-   10        50    PASS  28.9/80.0 GB (36%)    8.7s                3
-```
-
-If any p value OOMs at the heuristic batch size, the probe reports it and
-continues to the next p.
