@@ -40,6 +40,7 @@ import time
 from typing import List, Optional, Tuple, Dict, Any
 
 import torch
+import torch.multiprocessing as mp
 import numpy as np
 
 
@@ -172,6 +173,81 @@ from src.modules.grid_config import GridConfig
 from src.modules.batch_utils import batched_ols, batched_benjamini_hochberg
 from src.modules.batched_tabpfn import BatchedFoldTabPFN
 from src.models.var_pytorch import rolling_alpha_selection
+
+
+def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
+                    n_total_test_days, n_assets, p_max,
+                    ols_window, batch_chunk_size, lookback,
+                    dtype_str, verbose):
+    """Run Phase 4 OLS in a subprocess with a fresh CUDA context.
+
+    After TabPFN's heavy GPU usage in Phase 3 (58.5 GB peak, 10 rounds of
+    allocate/deallocate), the CUDA context is degraded and cuBLAS/MAGMA
+    operations fail with cudaErrorIllegalAddress. Since PyTorch has no way
+    to fully reset the CUDA context within a process, we run OLS in a
+    spawned subprocess that gets a completely fresh CUDA initialization.
+    """
+    import torch
+    from src.modules.batch_utils import batched_ols
+
+    dev = torch.device('cuda:0')
+    dtype = getattr(torch, dtype_str)  # e.g. 'float32' → torch.float32
+
+    theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
+                            device=dev, dtype=dtype)
+    SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
+                         device=dev, dtype=dtype)
+
+    for p in range(1, p_max + 1):
+        if p not in R_Y_all:
+            continue
+
+        R_Y = torch.from_numpy(R_Y_all[p]).to(device=dev, dtype=dtype)
+        R_T = torch.from_numpy(R_T_all[p]).to(device=dev, dtype=dtype)
+        first_row = first_residual_row[p]
+        n_residual_rows = R_Y.shape[0]
+        n_treatments = n_assets * p
+
+        if n_residual_rows < ols_window:
+            continue
+
+        T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2).contiguous()
+        Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2).contiguous()
+        n_windows = T_windows.shape[0]
+
+        try:
+            theta_batch = batched_ols(T_windows, Y_windows,
+                                      chunk_size=batch_chunk_size)
+
+            TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)
+            TtT_inv = torch.linalg.inv(TtT)
+            TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)
+
+            Y_pred = torch.bmm(T_windows, theta_batch)
+            residuals = Y_windows - Y_pred
+            RSS = (residuals ** 2).sum(dim=1)
+            df = ols_window - n_treatments
+            sigma_sq = RSS / df
+            se_batch = torch.sqrt(
+                TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1)
+            )
+
+            offset = first_row + ols_window - lookback
+            for i in range(n_windows):
+                day_rel_idx = i + offset
+                if 0 <= day_rel_idx < n_total_test_days:
+                    theta_all[day_rel_idx, :p, :, :] = \
+                        theta_batch[i].view(p, n_assets, n_assets)
+                    SE_all[day_rel_idx, :p, :, :] = \
+                        se_batch[i].view(p, n_assets, n_assets)
+
+        except RuntimeError as e:
+            if verbose:
+                print(f"    p={p}: OLS failed ({e})")
+            continue
+
+    # Return as numpy (CPU) — can't send CUDA tensors across processes
+    return theta_all.cpu().numpy(), SE_all.cpu().numpy()
 
 
 def _build_lagged_features(
@@ -823,78 +899,28 @@ def fit_oraclevarx_tabpfn(
         return None
 
     # =========================================================================
-    # Phase 4: Batched OLS for all days and all lags
+    # Phase 4: Batched OLS in subprocess (fresh CUDA context)
     # =========================================================================
-    print("  Phase 4: Running batched OLS for coefficient estimation...")
+    print("  Phase 4: Running batched OLS (subprocess for fresh CUDA)...")
 
     ols_window = config.ols_window
+    dtype_str = str(dtype).split('.')[-1]  # 'torch.float32' → 'float32'
 
-    # OLS runs on CPU to avoid CUDA context issues after heavy Phase 3 TabPFN.
-    # Same unfold→batched_ols pattern works on GPU in other models (dml_pytorch,
-    # var_pytorch, acle_var) where Phase 3 is CPU-based. After TabPFN's heavy
-    # GPU usage (58.5 GB peak), the CUDA state causes cuBLAS errors. CPU OLS
-    # is <1s total vs Phase 3's 3227s — zero performance impact.
-    cpu = torch.device('cpu')
-    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=cpu, dtype=dtype)
-    theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=cpu, dtype=dtype)
-    SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=cpu, dtype=dtype)
+    ctx = mp.get_context('spawn')
+    with ctx.Pool(1) as pool:
+        theta_np, SE_np = pool.apply(
+            _run_ols_phase4,
+            (R_Y_all, R_T_all, first_residual_row,
+             n_total_test_days, n_assets, p_max,
+             ols_window, config.batch_chunk_size, lookback,
+             dtype_str, verbose)
+        )
 
-    for p in range(1, p_max + 1):
-        if p not in R_Y_all:
-            continue
-
-        R_Y = torch.from_numpy(R_Y_all[p]).to(dtype=dtype)   # stays on CPU
-        R_T = torch.from_numpy(R_T_all[p]).to(dtype=dtype)   # stays on CPU
-        first_row = first_residual_row[p]
-        n_residual_rows = R_Y.shape[0]
-        n_treatments = n_assets * p
-
-        if n_residual_rows < ols_window:
-            continue
-
-        # Create sliding windows using unfold
-        T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)
-        Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)
-        n_windows = T_windows.shape[0]
-
-        try:
-            # Batched OLS: theta = (T'T)^{-1} T'Y
-            theta_batch = batched_ols(T_windows, Y_windows, chunk_size=config.batch_chunk_size)
-
-            # Compute standard errors
-            TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)
-            TtT_inv = torch.linalg.inv(TtT)
-            TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)
-
-            Y_pred = torch.bmm(T_windows, theta_batch)
-            residuals = Y_windows - Y_pred
-            RSS = (residuals ** 2).sum(dim=1)
-            df = ols_window - n_treatments
-            sigma_sq = RSS / df
-
-            se_batch = torch.sqrt(TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1))
-
-            # Map windows to test days
-            offset = first_row + ols_window - lookback
-
-            for i in range(n_windows):
-                day_rel_idx = i + offset
-                if 0 <= day_rel_idx < n_total_test_days:
-                    theta_reshaped = theta_batch[i].view(p, n_assets, n_assets)
-                    theta_all[day_rel_idx, :p, :, :] = theta_reshaped
-
-                    se_reshaped = se_batch[i].view(p, n_assets, n_assets)
-                    SE_all[day_rel_idx, :p, :, :] = se_reshaped
-
-        except RuntimeError as e:
-            if verbose:
-                print(f"    p={p}: OLS failed ({e})")
-            continue
-
-    # Move OLS results to GPU for Phase 5 (DML forecasting)
-    theta_all = theta_all.to(device=dev)
-    SE_all = SE_all.to(device=dev)
-    forecasts_all = forecasts_all.to(device=dev)
+    # Convert results to GPU tensors for Phase 5
+    theta_all = torch.from_numpy(theta_np).to(device=dev, dtype=dtype)
+    SE_all = torch.from_numpy(SE_np).to(device=dev, dtype=dtype)
+    forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max,
+                                device=dev, dtype=dtype)
 
     # =========================================================================
     # Phase 5: Generate forecasts using exact E[Y|W] and E[T|W]
