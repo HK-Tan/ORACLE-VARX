@@ -99,6 +99,34 @@ def _get_vram_usage() -> Tuple[float, float, float]:
     return (used, total, percent)
 
 
+def _get_torch_cuda_memory_stats() -> Dict[str, float]:
+    """Get PyTorch CUDA allocator memory stats in GB.
+
+    Returns current allocated/reserved memory and rolling peaks since the
+    last `torch.cuda.reset_peak_memory_stats()` call.
+    """
+    if not torch.cuda.is_available():
+        return {
+            "allocated_gb": 0.0,
+            "reserved_gb": 0.0,
+            "max_allocated_gb": 0.0,
+            "max_reserved_gb": 0.0,
+        }
+
+    return {
+        "allocated_gb": torch.cuda.memory_allocated() / (1024 ** 3),
+        "reserved_gb": torch.cuda.memory_reserved() / (1024 ** 3),
+        "max_allocated_gb": torch.cuda.max_memory_allocated() / (1024 ** 3),
+        "max_reserved_gb": torch.cuda.max_memory_reserved() / (1024 ** 3),
+    }
+
+
+def _reset_torch_cuda_peak_stats() -> None:
+    """Reset rolling CUDA peak memory counters for the current device."""
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def _get_batch_size_for_p(p: int, n_folds: int, n_confounders: int = 1, verbose: bool = False) -> int:
     """Get batch size for a given lag order p using size-based heuristic.
 
@@ -537,8 +565,14 @@ def fit_oraclevarx_tabpfn(
         interval = 60.0
         while not vram_monitor_stop.wait(timeout=interval):
             used, total, pct = _get_vram_usage()
+            mem = _get_torch_cuda_memory_stats()
             elapsed = time.time() - phase3_start
-            print(f"      [{elapsed:.0f}s] VRAM: {used:.1f}/{total:.1f} GB ({pct:.0f}%)", flush=True)
+            print(
+                f"      [{elapsed:.0f}s] VRAM(driver): {used:.1f}/{total:.1f} GB ({pct:.0f}%) "
+                f"| torch alloc/res: {mem['allocated_gb']:.1f}/{mem['reserved_gb']:.1f} GB "
+                f"| torch peak alloc/res: {mem['max_allocated_gb']:.1f}/{mem['max_reserved_gb']:.1f} GB",
+                flush=True
+            )
 
     vram_thread = None
     if verbose:
@@ -554,6 +588,7 @@ def fit_oraclevarx_tabpfn(
         n_treatments = n_assets * p
 
         p_start_time = time.time()
+        _reset_torch_cuda_peak_stats()
 
         # Get batch size using size-based heuristic
         effective_batch_size = _get_batch_size_for_p(p, n_folds_p, n_confounders=n_confounders, verbose=verbose)
@@ -619,12 +654,17 @@ def fit_oraclevarx_tabpfn(
             # Record VRAM and skip residuals/forecasts
             p_elapsed = time.time() - p_start_time
             used, total, pct = _get_vram_usage()
+            mem = _get_torch_cuda_memory_stats()
             probe_results[p] = {
                 'status': 'PASS',
                 'controls_features': n_confounders * p,
                 'vram_used': used,
                 'vram_total': total,
                 'vram_pct': pct,
+                'torch_allocated_gb': mem['allocated_gb'],
+                'torch_reserved_gb': mem['reserved_gb'],
+                'torch_peak_allocated_gb': mem['max_allocated_gb'],
+                'torch_peak_reserved_gb': mem['max_reserved_gb'],
                 'time': p_elapsed,
                 'batch_size_tested': effective_batch_size,
                 'suggested_batch_size': effective_batch_size,
@@ -632,8 +672,12 @@ def fit_oraclevarx_tabpfn(
             print(f"    PROBE p={p}: PASS (batch_size={effective_batch_size})")
             print(f"      Controls features: {n_confounders * p} "
                   f"({n_confounders} confounders x {p} lags)")
-            print(f"      VRAM after inference: "
+            print(f"      VRAM after inference (driver used): "
                   f"{used:.1f}/{total:.1f} GB ({pct:.1f}%)")
+            print(f"      Torch memory now (alloc/reserved): "
+                  f"{mem['allocated_gb']:.1f}/{mem['reserved_gb']:.1f} GB")
+            print(f"      Torch peak this p (alloc/reserved): "
+                  f"{mem['max_allocated_gb']:.1f}/{mem['max_reserved_gb']:.1f} GB")
             print(f"      Time: {p_elapsed:.1f}s")
             _clear_gpu_memory()
             tabpfn.clear_cache()
@@ -702,8 +746,11 @@ def fit_oraclevarx_tabpfn(
         if verbose:
             p_elapsed = time.time() - p_start_time
             used, total, pct = _get_vram_usage()
+            mem = _get_torch_cuda_memory_stats()
             print(f"    p={p}: completed in {p_elapsed:.1f}s, "
                   f"VRAM: {used:.1f}/{total:.1f} GB ({pct:.0f}%), "
+                  f"torch alloc/res: {mem['allocated_gb']:.1f}/{mem['reserved_gb']:.1f} GB, "
+                  f"torch peak alloc/res: {mem['max_allocated_gb']:.1f}/{mem['max_reserved_gb']:.1f} GB, "
                   f"residuals: {R_Y.shape}, forecast days: {len(forecast_Y_preds[p])}")
 
         # Delete fold_data for this p to free memory (minimizes peak memory)
@@ -735,7 +782,10 @@ def fit_oraclevarx_tabpfn(
     # In probe mode, print summary and return early
     if probe:
         print("\nPROBE COMPLETE")
-        header = f"  {'p':>3s}  {'features':>8s}  {'status':>6s}  {'VRAM':>20s}  {'time':>6s}  {'suggested_batch':>15s}"
+        header = (
+            f"  {'p':>3s}  {'features':>8s}  {'status':>6s}  {'VRAM(driver)':>20s}  "
+            f"{'torch peak res':>14s}  {'time':>6s}  {'suggested_batch':>15s}"
+        )
         print(header)
         print("  " + "-" * (len(header) - 2))
         for p in range(1, p_max + 1):
@@ -747,13 +797,18 @@ def fit_oraclevarx_tabpfn(
             status = pr['status']
             if status == 'PASS':
                 vram_str = f"{pr['vram_used']:.1f}/{pr['vram_total']:.1f} GB ({pr['vram_pct']:.0f}%)"
+                torch_peak_res_str = f"{pr['torch_peak_reserved_gb']:.1f} GB"
                 time_str = f"{pr['time']:.1f}s"
                 bs_str = str(pr['suggested_batch_size'])
             else:
                 vram_str = "N/A"
+                torch_peak_res_str = "N/A"
                 time_str = "N/A"
                 bs_str = str(pr.get('batch_size_tested', 'N/A'))
-            print(f"  {p:>3d}  {n_feat:>8d}  {status:>6s}  {vram_str:>20s}  {time_str:>6s}  {bs_str:>15s}")
+            print(
+                f"  {p:>3d}  {n_feat:>8d}  {status:>6s}  {vram_str:>20s}  "
+                f"{torch_peak_res_str:>14s}  {time_str:>6s}  {bs_str:>15s}"
+            )
         return None
 
     # =========================================================================
