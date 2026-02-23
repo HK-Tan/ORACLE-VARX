@@ -679,8 +679,9 @@ def fit_oraclevarx_tabpfn(
             print(f"      Torch peak this p (alloc/reserved): "
                   f"{mem['max_allocated_gb']:.1f}/{mem['max_reserved_gb']:.1f} GB")
             print(f"      Time: {p_elapsed:.1f}s")
+            # Free inference temporaries but keep model loaded between probes
+            # (matches non-probe behaviour; model reload is the expensive part)
             _clear_gpu_memory()
-            tabpfn.clear_cache()
             del fold_data[p]
             gc.collect()
             continue
