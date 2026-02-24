@@ -742,8 +742,8 @@ def fit_orvarx_core(
 
         if n_residual_rows >= ols_window:
             # Create sliding windows using unfold
-            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2)
-            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2)
+            T_windows = R_T.unfold(0, ols_window, 1).transpose(1, 2).contiguous()
+            Y_windows = R_Y.unfold(0, ols_window, 1).transpose(1, 2).contiguous()
             n_windows = T_windows.shape[0]
 
             try:
