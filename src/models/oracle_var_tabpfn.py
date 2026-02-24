@@ -256,9 +256,9 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                 day_rel_idx = i + offset
                 if 0 <= day_rel_idx < n_total_test_days:
                     theta_all[day_rel_idx, :p, :, :] = \
-                        theta_cpu[i].view(p, n_assets, n_assets)
+                        theta_cpu[i].view(p, n_assets, n_assets).transpose(-2, -1)
                     SE_all[day_rel_idx, :p, :, :] = \
-                        se_batch[i].view(p, n_assets, n_assets)
+                        se_batch[i].view(p, n_assets, n_assets).transpose(-2, -1)
 
         except RuntimeError as e:
             if verbose:
@@ -1001,7 +1001,7 @@ def fit_oraclevarx_tabpfn(
             if day_idx not in forecast_Y_preds[p] or day_idx not in forecast_T_preds[p]:
                 continue
 
-            theta = theta_all[day_rel_idx, :p, :, :].reshape(n_treatments, n_assets)
+            theta = theta_all[day_rel_idx, :p, :, :].transpose(-2, -1).reshape(n_treatments, n_assets)
 
             # Get exact E[Y|W] and E[T|W] from Phase 3
             E_Y_given_W = torch.from_numpy(forecast_Y_preds[p][day_idx]).to(device=dev, dtype=dtype)

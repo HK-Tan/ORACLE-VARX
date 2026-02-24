@@ -39,7 +39,7 @@ pyproject.toml
 # requirements.txt
 
 # Results files
-results/**/results.pt
+results/**/results.pt*
 
 ## Documentation
 docs/

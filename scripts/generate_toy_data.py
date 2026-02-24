@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate toy benchmark data")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--noise-scale", type=float, default=0.05,
-                        help="Innovation noise scaling α (default: 0.05)")
+                        help="Innovation noise scaling ν (default: 0.05)")
     parser.add_argument("--confounder-strength", type=float, default=1.0,
                         help="Confounder nuisance scaling λ (default: 1.0)")
     parser.add_argument("--T", type=int, default=3000)

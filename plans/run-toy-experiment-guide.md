@@ -207,7 +207,7 @@ Generates and saves toy benchmark data.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--seed` | int | `42` | Random seed |
-| `--noise-scale` | float | `0.05` | Innovation noise scaling α |
+| `--noise-scale` | float | `0.05` | Innovation noise scaling ν |
 | `--confounder-strength` | float | `1.0` | Confounder nuisance scaling λ |
 | `--T` | int | `3000` | Number of time steps |
 
@@ -223,7 +223,7 @@ Runs the toy benchmark experiments.
 | `--n-jobs` | int | auto | CPU cores for DML (`-1` = `physical_cores - 1`) |
 | `--device` | str | `cpu` | Device for Phase 2 TabPFN: `cpu` or `cuda` |
 | `--n-estimators` | int | `8` | TabPFN ensemble size for Phase 2 |
-| `--alpha` | float | — | Override innovation noise α (regenerates data) |
+| `--noise-scale` | float | — | Override innovation noise scale (regenerates data) |
 | `--confounder-strength` | float | — | Override confounder scaling λ (regenerates data) |
 | `--no-show` | flag | — | Don't display plots (use on headless servers) |
 | `--verbose` | flag | — | Print detailed progress |
@@ -348,22 +348,22 @@ python scripts/generate_toy_data.py --T 1500 --seed 123
 
 After regenerating, re-run the benchmark to get updated results.
 
-### Option B: Override α and λ directly in the benchmark command
+### Option B: Override noise-scale and λ directly in the benchmark command
 
-The `--alpha` and `--confounder-strength` flags regenerate data inline before running:
+The `--noise-scale` and `--confounder-strength` flags regenerate data inline before running:
 
 ```bash
-# Run Phase 0 with higher noise (α=0.1)
-python scripts/run_toy_benchmark.py --phase 0 --alpha 0.1 --no-show
+# Run Phase 0 with higher noise (noise_scale=0.1)
+python scripts/run_toy_benchmark.py --phase 0 --noise-scale 0.1 --no-show
 
 # Run Phase 0 with stronger confounding (λ=3.0)
 python scripts/run_toy_benchmark.py --phase 0 --confounder-strength 3.0 --no-show
 
 # Sweep: low noise + strong confounding
-python scripts/run_toy_benchmark.py --phase 0 --alpha 0.02 --confounder-strength 5.0 --no-show
+python scripts/run_toy_benchmark.py --phase 0 --noise-scale 0.02 --confounder-strength 5.0 --no-show
 
 # Full Phase 0+1 with custom DGP
-python scripts/run_toy_benchmark.py --phase all --alpha 0.1 --confounder-strength 2.0 --no-show
+python scripts/run_toy_benchmark.py --phase all --noise-scale 0.1 --confounder-strength 2.0 --no-show
 ```
 
 The `dgp_config.json` records all parameters for reproducibility.
