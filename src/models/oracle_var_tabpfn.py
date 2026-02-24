@@ -168,11 +168,11 @@ def _get_batch_size_for_p(
 
     return batch_size
 
-from src.results import ORACLEVARXResult
+from src.results import ORACLEVARXResult, VARXResult
 from src.modules.grid_config import GridConfig
 from src.modules.batch_utils import batched_ols, batched_benjamini_hochberg
 from src.modules.batched_tabpfn import BatchedFoldTabPFN
-from src.models.var_pytorch import rolling_alpha_selection
+from src.models.var_pytorch import rolling_alpha_selection, select_optimal_p
 
 
 def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
@@ -470,7 +470,7 @@ def fit_oraclevarx_tabpfn(
     target_vram_pct: float = 0.65,
     probe: bool = False,
     phase4_ols_device: str = "cuda",
-) -> Optional[ORACLEVARXResult]:
+) -> Optional[Tuple[VARXResult, ORACLEVARXResult]]:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
 
     This function uses TabPFN transformer for nuisance function estimation
@@ -501,7 +501,8 @@ def fit_oraclevarx_tabpfn(
             Use 'cpu' to avoid CUDA linear algebra failures in OLS.
 
     Returns:
-        ORACLEVARXResult with forecasts and coefficients, or None if probe=True.
+        Tuple of (VARXResult, ORACLEVARXResult) with OR-VARX and ORACLE-VARX
+        forecasts/coefficients, or None if probe=True.
 
     Note:
         TabPFN has limits: max 100 features, max 10,000 training samples.
@@ -1016,6 +1017,38 @@ def fit_oraclevarx_tabpfn(
             forecast = E_Y_given_W + causal_effect
             forecasts_all[day_rel_idx, :, p - 1] = forecast
 
+    # Shared tensors for Phase 5b and Phase 6+
+    actuals = Y[lookback:, :]
+    forecasts_all_transposed = forecasts_all.transpose(0, 1)  # (n_assets, n_total_test_days, p_max)
+
+    # =========================================================================
+    # Phase 5b: OR-VARX p-selection (RMSE-based, no significance tests)
+    # =========================================================================
+    print("  Phase 5b: OR-VARX p-selection (rolling RMSE)...")
+    orvarx_p_optimal = select_optimal_p(forecasts_all, actuals, validation_days)
+
+    # Extract OR-VARX forecasts at optimal p
+    orvarx_forecasts_sliced = forecasts_all_transposed[:, validation_days:, :]  # (n_assets, n_output_days, p_max)
+    orvarx_p_indices = (orvarx_p_optimal - 1).unsqueeze(0).unsqueeze(-1).expand(n_assets, -1, 1)
+    orvarx_forecasts = torch.gather(orvarx_forecasts_sliced, dim=2, index=orvarx_p_indices).squeeze(-1)
+
+    orvarx_result = VARXResult(
+        forecasts=orvarx_forecasts,
+        forecasts_all=orvarx_forecasts_sliced,
+        p_optimal=orvarx_p_optimal,
+        p_max=p_max,
+        coefficients=theta_all[validation_days:],
+        asset_names=asset_names,
+        confounder_names=confounder_names,
+        dates=dates,
+    )
+
+    # Print OR-VARX p statistics
+    orvarx_p_np = orvarx_p_optimal.cpu().numpy()
+    print(f"  OR-VARX p statistics: mean={orvarx_p_np.mean():.2f}, "
+          f"median={int(np.median(orvarx_p_np))}, "
+          f"min={orvarx_p_np.min()}, max={orvarx_p_np.max()}")
+
     # =========================================================================
     # Phase 6: Significance testing and alpha selection
     # =========================================================================
@@ -1049,11 +1082,7 @@ def fit_oraclevarx_tabpfn(
 
         p_alpha_all[:, alpha_idx] = p_selected
 
-    # Actuals for validation
-    actuals = Y[lookback:, :]
-
     # Rolling alpha selection
-    forecasts_all_transposed = forecasts_all.transpose(0, 1)
     alpha_optimal, _alpha_counts, _, p_optimal_all_days = rolling_alpha_selection(
         forecasts_all_batched=forecasts_all_transposed,
         p_alpha_all=p_alpha_all,
@@ -1093,7 +1122,7 @@ def fit_oraclevarx_tabpfn(
     total_time = time.time() - t0
     print(f"  Complete! Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
 
-    return ORACLEVARXResult(
+    return orvarx_result, ORACLEVARXResult(
         forecasts=forecasts_final,
         forecasts_all=forecasts_all_output,
         p_optimal_all=p_optimal_all_output,
