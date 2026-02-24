@@ -305,14 +305,14 @@ def _build_lagged_features(
     outcome = Y[start_idx + p:end_idx]
 
     # Treatment: lagged Y values
-    treatment = np.zeros((n_rows, n_assets * p), dtype=np.float32)
+    treatment = np.zeros((n_rows, n_assets * p))
     for lag in range(1, p + 1):
         lag_start = start_idx + p - lag
         lag_end = end_idx - lag
         treatment[:, (lag - 1) * n_assets:lag * n_assets] = Y[lag_start:lag_end]
 
     # Controls: lagged W values
-    controls = np.zeros((n_rows, n_confounders * p), dtype=np.float32)
+    controls = np.zeros((n_rows, n_confounders * p))
     for lag in range(1, p + 1):
         lag_start = start_idx + p - lag
         lag_end = end_idx - lag
