@@ -132,23 +132,25 @@ def _get_batch_size_for_p(
     p: int,
     n_folds: int,
     n_confounders: int = 1,
+    n_assets: int = 9,
     target_vram_pct: float = 0.65,
     verbose: bool = False,
 ) -> int:
     """Get batch size for a given lag order p using empirical scaling formula.
 
-    Batch size = floor(11 * total_vram_gb / (n_confounders^0.75 * p^1.5)).
+    Batch size = floor(99 * total_vram_gb / (n_assets * n_confounders^0.75 * p^1.5)).
 
     Calibrated from T-prediction probe data on A100 80 GB across VIX (n_c=1)
-    and macro5 (n_c=5) presets. Per-fold VRAM scales sub-linearly with
-    n_confounders (~n_c^0.75), and as p^1.5. The coefficient (11) targets
-    ~72% peak utilization in the worst case.  target_vram_pct is currently
-    unused but kept for future tuning.
+    and macro5 (n_c=5) presets with n_assets=9. Per-fold VRAM scales sub-linearly
+    with n_confounders (~n_c^0.75), linearly with n_assets, and as p^1.5.
+    The coefficient (99 = 11 * 9) normalizes so that n_assets=9 reproduces the
+    original heuristic. target_vram_pct is currently unused but kept for future tuning.
 
     Args:
         p: Lag order (1 to p_max).
         n_folds: Total number of folds available (for capping).
         n_confounders: Number of confounders (default: 1 for VIX).
+        n_assets: Number of endogenous assets (default: 9).
         target_vram_pct: Fraction of total VRAM to use as budget (reserved for future use).
         verbose: Print batch size calculation details.
 
@@ -157,13 +159,14 @@ def _get_batch_size_for_p(
     """
     _, total_vram_gb, _ = _get_vram_usage()
 
-    batch_size = int(11 * total_vram_gb / (n_confounders ** 0.75 * p ** 1.5))
+    coeff = 99 / n_assets
+    batch_size = int(coeff * total_vram_gb / (n_confounders ** 0.75 * p ** 1.5))
     batch_size = min(batch_size, n_folds)
     batch_size = max(1, batch_size)
 
     if verbose:
-        print(f"    p={p}: n_c={n_confounders}, "
-              f"11*{total_vram_gb:.0f}/({n_confounders}^0.75*{p}^1.5) "
+        print(f"    p={p}: n_a={n_assets}, n_c={n_confounders}, "
+              f"{coeff:.0f}*{total_vram_gb:.0f}/({n_confounders}^0.75*{p}^1.5) "
               f"-> batch={batch_size} (n_folds={n_folds})")
 
     return batch_size
@@ -702,6 +705,7 @@ def fit_oraclevarx_tabpfn(
         effective_batch_size = _get_batch_size_for_p(
             p, n_folds_p,
             n_confounders=n_confounders,
+            n_assets=n_assets,
             target_vram_pct=target_vram_pct,
             verbose=verbose,
         )
