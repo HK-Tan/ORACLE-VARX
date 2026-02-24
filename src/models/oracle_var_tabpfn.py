@@ -228,11 +228,19 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
         n_windows = T_windows.shape[0]
 
         try:
+            if verbose:
+                print(f"    p={p}: [debug] batched_ols starting (T_windows={T_windows.shape}, Y_windows={Y_windows.shape})...")
             theta_batch = batched_ols(T_windows, Y_windows,
                                       chunk_size=batch_chunk_size)
+            if verbose:
+                print(f"    p={p}: [debug] batched_ols done. bmm(T.T, T) starting...")
 
             TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)
+            if verbose:
+                print(f"    p={p}: [debug] bmm done. torch.linalg.inv starting (TtT={TtT.shape})...")
             TtT_inv = torch.linalg.inv(TtT)
+            if verbose:
+                print(f"    p={p}: [debug] inv done. Computing SE...")
             TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)
 
             Y_pred = torch.bmm(T_windows, theta_batch)
@@ -243,6 +251,8 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
             se_batch = torch.sqrt(
                 TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1)
             )
+            if verbose:
+                print(f"    p={p}: [debug] SE done.")
 
             offset = first_row + ols_window - lookback
             for i in range(n_windows):
