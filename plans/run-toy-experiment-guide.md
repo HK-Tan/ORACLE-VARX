@@ -389,7 +389,7 @@ rsync -avz -e "ssh -i <your-key.pem>" ubuntu@<EC2-IP>:~/ORACLE-VARX/results-toy/
 Using `tnr scp` (recommended — handles keys and ports automatically):
 
 ```bash
-tnr scp 0:~/ORACLE-VARX/results-toy/ ./results-toy/
+tnr scp 0:~/ORACLE-VARX/results-toy/ ./
 ```
 
 > **ThunderCompute notes:**
