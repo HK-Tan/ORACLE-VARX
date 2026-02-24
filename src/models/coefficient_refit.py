@@ -227,7 +227,7 @@ def refit_dml_coefficients_for_day_tabpfn(
         PerPCoefficients with coefficients[p] = (p, n_assets, n_assets)
     """
     from src.models.dml_pytorch import _build_lagged_features, _build_test_features, estimate_theta
-    from src.modules.factory import get_multi_output_regressor
+    from src.modules.batched_tabpfn import BatchedFoldTabPFN
 
     device = str(device).lower()
     if device not in {"cuda", "cpu"}:
@@ -250,9 +250,10 @@ def refit_dml_coefficients_for_day_tabpfn(
     ols_start = tree_train_end
     ols_end = day_idx
 
-    for p in range(1, p_star + 1):
-        n_treatments = n_assets * p
+    # Load TabPFN models once (not per-p × per-output like MultiOutputRegressor)
+    tabpfn = BatchedFoldTabPFN(n_estimators=8, device=device)
 
+    for p in range(1, p_star + 1):
         outcome_train, treatment_train, controls_train = _build_lagged_features(
             Y_np, W_np, p, window_start, tree_train_end
         )
@@ -261,18 +262,15 @@ def refit_dml_coefficients_for_day_tabpfn(
             Y_np, W_np, p, ols_start, ols_end
         )
 
-        # Use TabPFN via factory
-        Y_model = get_multi_output_regressor('tabpfn', device=device)
-        T_model = get_multi_output_regressor('tabpfn', device=device)
+        # Batched Y prediction: 1 "fold", all n_assets outputs in one forward pass
+        Y_pred = tabpfn.fit_predict_batch(
+            [controls_train], [outcome_train], [controls_ols]
+        )[0]  # (n_ols, n_assets)
 
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            Y_model.fit(controls_train, outcome_train)
-            T_model.fit(controls_train, treatment_train)
-
-        Y_pred = Y_model.predict(controls_ols)
-        T_pred = T_model.predict(controls_ols)
+        # Batched T prediction: 1 "fold", all n_assets*p outputs in one forward pass
+        T_pred = tabpfn.fit_predict_batch(
+            [controls_train], [treatment_train], [controls_ols]
+        )[0]  # (n_ols, n_assets*p)
 
         R_Y = torch.from_numpy((outcome_ols - Y_pred).astype(np.float32)).to(theta_device)
         R_T = torch.from_numpy((treatment_ols - T_pred).astype(np.float32)).to(theta_device)
@@ -280,8 +278,6 @@ def refit_dml_coefficients_for_day_tabpfn(
         theta = estimate_theta(R_Y, R_T)
         A_matrices = theta.view(p, n_assets, n_assets)
         result.coefficients[p] = A_matrices
-
-        del Y_model, T_model
 
     return result
 
