@@ -101,6 +101,7 @@ def main(
     p_max: int = 10,
     alpha_grid: list = None,
     output_dir: str = "results/oraclevarx_tabpfn",
+    orvarx_output_dir: str = "results/orvarx_tabpfn",
     experiment_name: str = None,
     show_plots: bool = True,
     verbose: bool = False,
@@ -167,8 +168,8 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate experiment name if not provided
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if experiment_name is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         experiment_name = f"oraclevarx_tabpfn_{conf_label}_{timestamp}"
 
     print(f"\nExperiment: {experiment_name}")
@@ -226,7 +227,7 @@ def main(
     print(f"    Expected output days: {n_test_days}")
 
     start_time = time.perf_counter()
-    result = fit_oraclevarx_tabpfn(
+    fit_result = fit_oraclevarx_tabpfn(
         Y=Y_etf,
         W=W,
         alpha_grid=alpha_grid,
@@ -247,6 +248,8 @@ def main(
     if probe:
         print(f"\nProbe complete ({elapsed:.1f}s). No results to save.")
         return None, None, None
+
+    orvarx_result, result = fit_result
 
     print(f"\n  Results:")
     print(f"    Method: {result.method}")
@@ -432,6 +435,102 @@ def main(
     raw_perf_path = experiment_dir / "performance_raw.csv"
     performance_df_raw.to_csv(raw_perf_path, index=False)
     print(f"  performance_raw: {raw_perf_path}")
+
+    # =========================================================================
+    # Step 6: OR-VARX Backtest & Save
+    # =========================================================================
+    print("\n" + "-" * 40)
+    print("Step 6: OR-VARX Backtest & Save")
+    print("-" * 40)
+
+    orvarx_output_dir = Path(orvarx_output_dir)
+    orvarx_output_dir.mkdir(parents=True, exist_ok=True)
+
+    orvarx_experiment_name = f"orvarx_tabpfn_{conf_label}_{timestamp}"
+    orvarx_experiment_dir = orvarx_output_dir / orvarx_experiment_name
+    orvarx_experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    # OR-VARX p_optimal statistics
+    orvarx_p_np = orvarx_result.p_optimal.cpu().numpy()
+    print(f"\n  OR-VARX p_optimal statistics:")
+    print(f"    Mean: {orvarx_p_np.mean():.2f}")
+    print(f"    Median: {int(np.median(orvarx_p_np))}")
+    print(f"    Min: {orvarx_p_np.min()}, Max: {orvarx_p_np.max()}")
+    print(f"    Unique values: {np.unique(orvarx_p_np)}")
+
+    # Run OR-VARX backtest (market-adjusted)
+    orvarx_pnl = run_backtest(
+        result=orvarx_result,
+        actual_returns=actual_returns,
+        strategies=["naive", "weighted", "top_50", "top_25", "top_75"],
+        market_adjustment=True,
+        benchmark="SPY",
+        include_spy=False,
+    )
+
+    # Run OR-VARX backtest (raw)
+    orvarx_pnl_raw = run_backtest(
+        result=orvarx_result,
+        actual_returns=actual_returns,
+        strategies=["naive", "weighted", "top_50", "top_25", "top_75"],
+        market_adjustment=False,
+        benchmark="SPY",
+        include_spy=True,
+    )
+
+    print("\n  OR-VARX Market-Adjusted Performance:")
+    orvarx_perf_df = print_performance_summary(orvarx_pnl)
+
+    print("\n  OR-VARX Raw Performance (with SPY Benchmark):")
+    orvarx_perf_df_raw = print_performance_summary(orvarx_pnl_raw)
+
+    # OR-VARX plots
+    orvarx_lag_path = orvarx_experiment_dir / "lag_analysis.png"
+    plot_lag_analysis(
+        p_optimal=orvarx_result.p_optimal.cpu().numpy(),
+        dates=pd.to_datetime(orvarx_result.dates),
+        title=f"OR-VARX ({conf_label}/TabPFN): Optimal Lag (p) Over Time\np_max={p_max}, validation={validation_days} days",
+        save_path=str(orvarx_lag_path),
+        show_plot=show_plots,
+    )
+    print(f"  Saved: {orvarx_lag_path}")
+
+    orvarx_strategy_path = orvarx_experiment_dir / "strategy_comparison.png"
+    plot_strategy_comparison(
+        pnl_results=orvarx_pnl,
+        market_adjusted=True,
+        title=f"OR-VARX ({conf_label}/TabPFN): Market-Adjusted Strategy Comparison\n{orvarx_result.dates[0]} to {orvarx_result.dates[-1]}",
+        save_path=str(orvarx_strategy_path),
+        show_plot=show_plots,
+    )
+    print(f"  Saved: {orvarx_strategy_path}")
+
+    orvarx_strategy_raw_path = orvarx_experiment_dir / "strategy_comparison_raw.png"
+    plot_strategy_comparison(
+        pnl_results=orvarx_pnl_raw,
+        include_spy=True,
+        market_adjusted=False,
+        title=f"OR-VARX ({conf_label}/TabPFN): Strategy Comparison vs SPY\n{orvarx_result.dates[0]} to {orvarx_result.dates[-1]}",
+        save_path=str(orvarx_strategy_raw_path),
+        show_plot=show_plots,
+    )
+    print(f"  Saved: {orvarx_strategy_raw_path}")
+
+    # Save OR-VARX results
+    orvarx_paths = save_experiment_results(
+        result=orvarx_result,
+        pnl_results=orvarx_pnl,
+        performance_df=orvarx_perf_df,
+        output_dir=orvarx_output_dir,
+        experiment_name=orvarx_experiment_name,
+    )
+
+    for file_type, path in orvarx_paths.items():
+        print(f"  {file_type}: {path}")
+
+    orvarx_raw_perf_path = orvarx_experiment_dir / "performance_raw.csv"
+    orvarx_perf_df_raw.to_csv(orvarx_raw_perf_path, index=False)
+    print(f"  performance_raw: {orvarx_raw_perf_path}")
 
     print("\n" + "=" * 80)
     print("EXPERIMENT COMPLETE")

@@ -10,6 +10,7 @@
 | **ACLE-VARX** x 3 | Regularized VARX via elastic net (OLS-fitted, no learner needed) | No |
 | **OR-VARX** x 12 | Orthogonal VARX — uses Double Machine Learning (DML) to partial out confounder effects with a tree-based first-stage learner, 4 learners x 3 confounder presets | No |
 | **ORACLE-VARX** x 12 | OR-VARX plus ACLE regularization on the second-stage coefficients, 4 learners x 3 confounder presets | No |
+| **OR-VARX-TabPFN** x 3 | OR-VARX using TabPFN as the first-stage DML learner, 3 confounder presets | **Yes** |
 | **ORACLE-VARX-TabPFN** x 3 | ORACLE-VARX using TabPFN (a GPU-based tabular transformer) as the first-stage learner, 3 confounder presets | **Yes** |
 
 The four tree-based learners used in OR-VARX and ORACLE-VARX are: `lgbm`, `xgboost`, `rf`, `extra_trees`.
@@ -49,7 +50,7 @@ The orchestrator (`run_all_experiments.py`) organizes work into 4 CPU phases plu
 | **Phase 1** | VIX x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **Phase 2** | macro5 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
 | **Phase 3** | all10 x 4 learners (parallel tmux panes) | OR-VARX x4, ORACLE-VARX x4 | CPU |
-| **TabPFN** | 3 confounder presets (run manually) | ORACLE-VARX-TabPFN x3 | **GPU** |
+| **TabPFN** | 3 confounder presets (run manually) | OR-VARX-TabPFN x3, ORACLE-VARX-TabPFN x3 | **GPU** |
 
 Phase 0 runs all OLS methods sequentially with full CPU access (`--ols-only` for confounder presets). Phases 1-3 run DML methods only — `run_combined_experiment.py` without `--ols-only` goes directly to the DML branch.
 
