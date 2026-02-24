@@ -186,6 +186,9 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders all10 --no-show
 # Debug run example: p=1..3 with CPU Phase 4 OLS
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --p-max 3 --phase4-ols-device cpu --no-show --verbose
 
+# Debug run example: p=1..3 with GPU Phase 4 OLS
+python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --p-max 3 --no-show --verbose
+
 # Just probing VRAM behaviors
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
 
