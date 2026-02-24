@@ -193,7 +193,9 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose --skip-heatmap
 ```
 
-Note: By default, --phase4-ols-device is cpu so typing --phase4-ols-device cpu is optional.
+Note: By default, --phase4-ols-device is cuda (GPU OLS in a fresh subprocess). Use --phase4-ols-device cpu to force CPU OLS if you encounter GPU issues.
+
+> **`--no-show` is required on headless servers** (EC2, etc.). Without it, matplotlib tries to open an interactive display window and will crash with a backend error. Always use `--no-show` when running remotely.
 
 ## 7. CLI Reference
 
@@ -244,7 +246,7 @@ Runs ORACLE-VARX with TabPFN as the first-stage learner (GPU required).
 | `--no-show` | flag | — | Don't display plots |
 | `--verbose` | flag | — | Print detailed progress |
 | `--probe` | flag | — | Probe mode: run 1 fold per p to test VRAM usage (no results saved) |
-| `--phase4-ols-device` | str | `cpu` | Device for Phase 4 batched OLS (`cpu` or `cuda`) |
+| `--phase4-ols-device` | str | `cuda` | Device for Phase 4 batched OLS (`cpu` or `cuda`) |
 | `--skip-heatmap` | flag | — | Skip coefficient heatmap refit (avoids slow TabPFN refit) |
 
 ## 8. Output Structure

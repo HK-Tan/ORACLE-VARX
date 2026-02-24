@@ -105,7 +105,7 @@ def main(
     show_plots: bool = True,
     verbose: bool = False,
     probe: bool = False,
-    phase4_ols_device: str = "cpu",
+    phase4_ols_device: str = "cuda",
     skip_heatmap: bool = False,
 ):
     """Run ORACLE-VARX experiment with TabPFN.
@@ -472,8 +472,8 @@ Example:
     parser.add_argument("--probe", action="store_true",
                         help="Probe mode: run 1 fold per p with batch_size=1 to test VRAM usage. "
                              "No results are saved.")
-    parser.add_argument("--phase4-ols-device", type=str, default="cpu", choices=["cpu", "cuda"],
-                        help="Device for Phase 4 batched OLS (default: cpu).")
+    parser.add_argument("--phase4-ols-device", type=str, default="cuda", choices=["cpu", "cuda"],
+                        help="Device for Phase 4 batched OLS (default: cuda).")
     parser.add_argument("--skip-heatmap", action="store_true",
                         help="Skip coefficient heatmap refit (avoids slow TabPFN refit after main run)")
 
