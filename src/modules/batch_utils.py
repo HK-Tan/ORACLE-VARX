@@ -9,7 +9,7 @@ Key functions:
 """
 
 import torch
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 
 def batched_ols(
@@ -17,7 +17,8 @@ def batched_ols(
     Y_batch: torch.Tensor,
     rcond: Optional[float] = None,
     chunk_size: Optional[int] = None,
-) -> torch.Tensor:
+    return_XtX: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Batched OLS regression: beta = (X'X)^{-1} X'Y
 
     Solves the normal equations for multiple regression problems in parallel
@@ -62,7 +63,8 @@ def batched_ols(
 
     # Chunking logic for large batches (GPU memory management)
     if chunk_size is not None and batch_size > chunk_size:
-        results = []
+        beta_chunks = []
+        xtx_chunks = []
         for start in range(0, batch_size, chunk_size):
             end = min(start + chunk_size, batch_size)
             chunk_result = batched_ols(
@@ -70,9 +72,16 @@ def batched_ols(
                 Y_batch[start:end],
                 rcond=rcond,
                 chunk_size=None,  # Don't recurse further
+                return_XtX=return_XtX,
             )
-            results.append(chunk_result)
-        return torch.cat(results, dim=0)
+            if return_XtX:
+                beta_chunks.append(chunk_result[0])
+                xtx_chunks.append(chunk_result[1])
+            else:
+                beta_chunks.append(chunk_result)
+        if return_XtX:
+            return torch.cat(beta_chunks, dim=0), torch.cat(xtx_chunks, dim=0)
+        return torch.cat(beta_chunks, dim=0)
 
     # Validate input shapes
     if X_batch.dim() != 3:
@@ -97,7 +106,10 @@ def batched_ols(
     # Use lstsq: batched, handles singular matrices gracefully.
     # Default rcond=None lets PyTorch use eps * max(m, n), which adapts
     # to dtype and matrix size — safer than a hardcoded threshold.
-    return torch.linalg.lstsq(XtX, XtY, rcond=rcond).solution
+    beta = torch.linalg.lstsq(XtX, XtY, rcond=rcond).solution
+    if return_XtX:
+        return beta, XtX
+    return beta
 
 
 def batched_benjamini_hochberg(p_values: torch.Tensor, alpha: float) -> torch.Tensor:

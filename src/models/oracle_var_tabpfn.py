@@ -205,10 +205,11 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
 
     dtype = getattr(torch, dtype_str)  # e.g. 'float32' → torch.float32
 
+    # Allocate on CPU — returned as numpy anyway, and avoids GPU inv issues
     theta_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
-                            device=dev, dtype=dtype)
+                            dtype=dtype)
     SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
-                         device=dev, dtype=dtype)
+                         dtype=dtype)
 
     for p in range(1, p_max + 1):
         if p not in R_Y_all:
@@ -228,38 +229,31 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
         n_windows = T_windows.shape[0]
 
         try:
-            if verbose:
-                print(f"    p={p}: [debug] batched_ols starting (T_windows={T_windows.shape}, Y_windows={Y_windows.shape})...")
-            theta_batch = batched_ols(T_windows, Y_windows,
-                                      chunk_size=batch_chunk_size)
-            if verbose:
-                print(f"    p={p}: [debug] batched_ols done. bmm(T.T, T) starting...")
+            theta_batch, TtT = batched_ols(T_windows, Y_windows,
+                                           chunk_size=batch_chunk_size,
+                                           return_XtX=True)
 
-            TtT = torch.bmm(T_windows.transpose(1, 2), T_windows)
-            if verbose:
-                print(f"    p={p}: [debug] bmm done. torch.linalg.inv starting (TtT={TtT.shape})...")
-            TtT_inv = torch.linalg.inv(TtT)
-            if verbose:
-                print(f"    p={p}: [debug] inv done. Computing SE...")
+            # SE on CPU (torch.linalg.inv crashes on GPU for large batches)
+            TtT_cpu = TtT.cpu()
+            TtT_inv = torch.linalg.inv(TtT_cpu)
             TtT_inv_diag = torch.diagonal(TtT_inv, dim1=-2, dim2=-1)
 
-            Y_pred = torch.bmm(T_windows, theta_batch)
-            residuals = Y_windows - Y_pred
+            theta_cpu = theta_batch.cpu()
+            Y_pred = torch.bmm(T_windows.cpu(), theta_cpu)
+            residuals = Y_windows.cpu() - Y_pred
             RSS = (residuals ** 2).sum(dim=1)
             df = ols_window - n_treatments
             sigma_sq = RSS / df
             se_batch = torch.sqrt(
                 TtT_inv_diag.unsqueeze(-1) * sigma_sq.unsqueeze(1)
             )
-            if verbose:
-                print(f"    p={p}: [debug] SE done.")
 
             offset = first_row + ols_window - lookback
             for i in range(n_windows):
                 day_rel_idx = i + offset
                 if 0 <= day_rel_idx < n_total_test_days:
                     theta_all[day_rel_idx, :p, :, :] = \
-                        theta_batch[i].view(p, n_assets, n_assets)
+                        theta_cpu[i].view(p, n_assets, n_assets)
                     SE_all[day_rel_idx, :p, :, :] = \
                         se_batch[i].view(p, n_assets, n_assets)
 
@@ -268,8 +262,14 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                 print(f"    p={p}: OLS failed ({e})")
             continue
 
-    # Return as numpy (CPU) — can't send CUDA tensors across processes
-    return theta_all.cpu().numpy(), SE_all.cpu().numpy()
+        # Cleanup GPU memory between p iterations
+        del R_Y, R_T, T_windows, Y_windows
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+    # Return as numpy — already on CPU
+    return theta_all.numpy(), SE_all.numpy()
 
 
 def _build_lagged_features(
