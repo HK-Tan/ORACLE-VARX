@@ -193,7 +193,7 @@ python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --probe
 python scripts/run_oraclevarx_tabpfn_experiment.py --confounders vix --no-show --verbose --skip-heatmap
 ```
 
-Note: There is no `--p-list` option in this script. Lag orders are always run as the inclusive range `p=1..p_max`.
+Note: By default, --phase4-ols-device is cpu so typing --phase4-ols-device cpu is optional.
 
 ## 7. CLI Reference
 
@@ -261,7 +261,9 @@ Each method saves results under `results/<method>/<experiment_name>/`:
 | `strategy_comparison.png` | Market-adjusted strategy comparison chart |
 | `strategy_comparison_raw.png` | Raw strategy comparison vs SPY |
 
-## 9. Copying Results from EC2
+## 9. Copying Results
+
+### From EC2
 
 Using `scp`:
 
@@ -275,5 +277,17 @@ Using `rsync` (resume-capable, recommended for large transfers):
 rsync -avz -e "ssh -i <your-key.pem>" ubuntu@<EC2-IP>:~/ORACLE-VARX/results/ ./results/
 ```
 
-
 > **Note on c8a vCPU counts:** The c8a instance family (AMD EPYC 5th gen) ships with SMT disabled by default (1 thread per core), so **1 vCPU = 1 physical core**. For example, `c8a.4xlarge` has 16 vCPUs = 16 physical cores. This differs from older families (c5, m5, etc.) where 2 vCPUs = 1 core due to hyperthreading.
+
+### From ThunderCompute
+
+Using `tnr scp` (recommended — handles keys and ports automatically):
+
+```bash
+tnr scp 0:~/ORACLE-VARX/results/ ./results/
+```
+
+> **ThunderCompute notes:**
+> - Install the CLI with `pip install tnr` and authenticate with `tnr login`.
+> - SSH ports can change between sessions — always re-check with `tnr status`.
+> - There is no stop/restart — only delete or snapshot. **Download results before deleting the instance.**
