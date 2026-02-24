@@ -187,7 +187,7 @@ def refit_dml_coefficients_for_day(
         theta = estimate_theta(R_Y, R_T)  # (n_treatments, n_assets)
 
         # Reshape to (p, n_assets, n_assets) - same convention as VAR
-        A_matrices = theta.view(p, n_assets, n_assets)
+        A_matrices = theta.view(p, n_assets, n_assets).transpose(-2, -1)
         result.coefficients[p] = A_matrices
 
         # Free models immediately
@@ -276,7 +276,7 @@ def refit_dml_coefficients_for_day_tabpfn(
         R_T = torch.from_numpy((treatment_ols - T_pred).astype(np.float32)).to(theta_device)
 
         theta = estimate_theta(R_Y, R_T)
-        A_matrices = theta.view(p, n_assets, n_assets)
+        A_matrices = theta.view(p, n_assets, n_assets).transpose(-2, -1)
         result.coefficients[p] = A_matrices
 
     return result

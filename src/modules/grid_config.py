@@ -11,7 +11,7 @@ Grid Layout for VAR:
     |  ols_window + p_max_offset  |
 
 Grid Layout for OR-VARX:
-    |<--------------- lookback_orvarx ---------------->|
+    |<--------------- lookback_orvarx ----------------->|
     |<-- tree_train -->|<-- ols_window -->|<-- offset -->|
     |     504 days     |     504 days     |   10 days    |
     |                       1018 days total              |
@@ -22,6 +22,7 @@ ensuring sufficient history is available for lag computation.
 
 import warnings
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -30,7 +31,7 @@ class GridConfig:
 
     Attributes:
         ols_window: Rows for final OLS regression (both VAR and OR-VARX), default: 504 ~ 2 years
-        tree_train_window: First-stage tree training window (OR-VARX only), default: 504 ~ 2 years
+        tree_train_window: First-stage tree training window (OR-VARX only), defaults to ols_window
         test_size: Test/forecast window size in days (default: 21 ~ 1 month)
         p_max_offset: Extra days for VAR lag computation (default: 10)
 
@@ -50,7 +51,7 @@ class GridConfig:
 
     # Core window sizes
     ols_window: int = 504          # Rows for final OLS (both methods)
-    tree_train_window: int = 504   # First-stage tree training (OR-VARX only)
+    tree_train_window: Optional[int] = None  # First-stage tree training; defaults to ols_window
 
     # Grid parameters
     test_size: int = 21            # Test window per fold (~1 month)
@@ -60,6 +61,10 @@ class GridConfig:
 
     # Batch processing parameters
     batch_chunk_size: int = 1000   # Chunk size for batched OLS (GPU memory management)
+
+    def __post_init__(self):
+        if self.tree_train_window is None:
+            self.tree_train_window = self.ols_window
 
     @property
     def lookback_var(self) -> int:

@@ -766,10 +766,10 @@ def fit_orvarx_core(
                 for i in range(n_windows):
                     day_rel_idx = i + offset
                     if 0 <= day_rel_idx < n_total_test_days:
-                        theta_reshaped = theta_all_batch[i].view(p, n_assets, n_assets)
+                        theta_reshaped = theta_all_batch[i].view(p, n_assets, n_assets).transpose(-2, -1)
                         coefficients[day_rel_idx, :p, :, :] = theta_reshaped
 
-                        se_reshaped = se_all[i].view(p, n_assets, n_assets)
+                        se_reshaped = se_all[i].view(p, n_assets, n_assets).transpose(-2, -1)
                         standard_errors[day_rel_idx, :p, :, :] = se_reshaped
 
             except RuntimeError:

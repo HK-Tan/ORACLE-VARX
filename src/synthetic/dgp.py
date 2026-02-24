@@ -1,7 +1,7 @@
 """Data-Generating Process for the 3-variable time-varying confounded toy benchmark."""
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -40,10 +40,14 @@ class ToyDGPConfig:
     # Experiment config
     p_max: int = 5
     ols_window: int = 200
-    tree_train_window: int = 100
+    tree_train_window: Optional[int] = None  # defaults to ols_window
     p_max_offset: int = 5
     test_size: int = 20
     validation_days: int = 20
+
+    def __post_init__(self):
+        if self.tree_train_window is None:
+            self.tree_train_window = self.ols_window
 
     @property
     def lookback_var(self) -> int:
@@ -151,18 +155,18 @@ def generate_toy_data(
         # Post-burn-in time index for decay functions
         t_decay = max(0, t - config.burn_in)
 
-        # Nuisance from W_{t-1}, scaled by α * λ
-        alpha_lam = config.noise_scale * config.confounder_strength
-        g_x = alpha_lam * _g_X(W_all[t - 1])
-        g_y = alpha_lam * _g_Y(W_all[t - 1])
-        g_z = alpha_lam * _g_Z(W_all[t - 1])
+        # Nuisance from W_{t-1}, scaled by ν * λ
+        nu_lam = config.noise_scale * config.confounder_strength
+        g_x = nu_lam * _g_X(W_all[t - 1])
+        g_y = nu_lam * _g_Y(W_all[t - 1])
+        g_z = nu_lam * _g_Z(W_all[t - 1])
 
         # Time-varying coefficients
         axx = config.a_XX_init * max(0.0, 1.0 - t_decay / config.a_XX_decay_end)
         ayy = config.a_YY_init * max(0.0, 1.0 - t_decay / config.a_YY_decay_end)
         azz = config.a_ZZ_init * max(0.0, 1.0 - t_decay / config.a_ZZ_decay_end)
 
-        # X_t = 0.60*Z_{t-1} + a_XX(t)*X_{t-2} + α*λ*g_X(W_{t-1}) + α*ε_X
+        # X_t = 0.60*Z_{t-1} + a_XX(t)*X_{t-2} + ν*λ*g_X(W_{t-1}) + ν*ε_X
         Y_all[t, 0] = (
             config.cross_effect * Y_all[t - 1, 2]
             + axx * Y_all[t - 2, 0]
@@ -170,7 +174,7 @@ def generate_toy_data(
             + config.noise_scale * eps[t, 0]
         )
 
-        # Y_t = 0.60*X_{t-1} + a_YY(t)*Y_{t-2} + α*λ*g_Y(W_{t-1}) + α*ε_Y
+        # Y_t = 0.60*X_{t-1} + a_YY(t)*Y_{t-2} + ν*λ*g_Y(W_{t-1}) + ν*ε_Y
         Y_all[t, 1] = (
             config.cross_effect * Y_all[t - 1, 0]
             + ayy * Y_all[t - 2, 1]
@@ -178,7 +182,7 @@ def generate_toy_data(
             + config.noise_scale * eps[t, 1]
         )
 
-        # Z_t = 0.60*Y_{t-1} + a_ZZ(t)*Z_{t-3} + α*λ*g_Z(W_{t-1}) + α*ε_Z
+        # Z_t = 0.60*Y_{t-1} + a_ZZ(t)*Z_{t-3} + ν*λ*g_Z(W_{t-1}) + ν*ε_Z
         Y_all[t, 2] = (
             config.cross_effect * Y_all[t - 1, 1]
             + azz * Y_all[t - 3, 2]

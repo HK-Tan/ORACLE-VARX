@@ -879,8 +879,8 @@ def main():
                         help="Device for Phase 2 TabPFN (default: cpu)")
     parser.add_argument("--n-estimators", type=int, default=8,
                         help="TabPFN ensemble size for Phase 2 (default: 8)")
-    parser.add_argument("--alpha", type=float, default=None,
-                        help="Innovation noise α (regenerates data if set)")
+    parser.add_argument("--noise-scale", type=float, default=None,
+                        help="Innovation noise scale (regenerates data if set)")
     parser.add_argument("--confounder-strength", type=float, default=None,
                         help="Confounder nuisance scaling λ (regenerates data if set)")
     parser.add_argument("--no-show", action="store_true", help="Don't display plots")
@@ -896,15 +896,15 @@ def main():
         learner_names = [args.learner]
 
     # Regenerate data if alpha or confounder_strength overridden
-    if args.alpha is not None or args.confounder_strength is not None:
+    if args.noise_scale is not None or args.confounder_strength is not None:
         from src.synthetic.dgp import ToyDGPConfig, generate_toy_data as gen_data
 
         dgp_cfg = ToyDGPConfig()
-        if args.alpha is not None:
-            dgp_cfg.noise_scale = args.alpha
+        if args.noise_scale is not None:
+            dgp_cfg.noise_scale = args.noise_scale
         if args.confounder_strength is not None:
             dgp_cfg.confounder_strength = args.confounder_strength
-        print(f"Regenerating data: α={dgp_cfg.noise_scale}, λ={dgp_cfg.confounder_strength}")
+        print(f"Regenerating data: noise_scale={dgp_cfg.noise_scale}, λ={dgp_cfg.confounder_strength}")
         Y_np, W_np, truth = gen_data(dgp_cfg)
 
         out_dir = DATA_DIR
@@ -938,7 +938,7 @@ def main():
     # Create GridConfig matching toy parameters
     config = GridConfig(
         ols_window=dgp_config["ols_window"],
-        tree_train_window=dgp_config["tree_train_window"],
+        tree_train_window=dgp_config.get("tree_train_window"),
         test_size=dgp_config["test_size"],
         p_max_offset=dgp_config["p_max_offset"],
     )

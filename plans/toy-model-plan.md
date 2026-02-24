@@ -63,22 +63,22 @@ g_Z(W_{t-1}) = (W1·W2 + tanh(W3) + cos(π·W1)) / 1.7
 
 Each function uses distinct nonlinear forms (tanh, quadratic, sine, ReLU, interaction, cosine) and is **normalized to std ≈ 1** under the AR(1) confounder distribution. This keeps nuisance consistently nonlinear and favors nonlinear first-stage learners for orthogonalization.
 
-The nuisance enters the structural equations as **α · λ · g(W_{t-1})**, where:
-- **α** (noise_scale) controls the overall noise floor — both innovation and confounding scale with α
+The nuisance enters the structural equations as **ν · λ · g(W_{t-1})**, where:
+- **ν** (noise_scale) controls the overall noise floor — both innovation and confounding scale with ν
 - **λ** (confounder_strength) scales confounding relative to innovation noise (λ=1 means equal strength)
 
-This design means lowering α produces uniformly cleaner estimates, while λ independently controls how much DML has to correct.
+This design means lowering ν produces uniformly cleaner estimates, while λ independently controls how much DML has to correct.
 
 ### 4.4 Structural Equations
 
 ```
-X_t = 0.60·Z_{t-1} + a_XX(t)·X_{t-2}                + α·λ·g_X(W_{t-1}) + α·ε_X,t
-Y_t = 0.60·X_{t-1} + a_YY(t)·Y_{t-2}                + α·λ·g_Y(W_{t-1}) + α·ε_Y,t
-Z_t = 0.60·Y_{t-1}                    + a_ZZ(t)·Z_{t-3} + α·λ·g_Z(W_{t-1}) + α·ε_Z,t
+X_t = 0.60·Z_{t-1} + a_XX(t)·X_{t-2}                + ν·λ·g_X(W_{t-1}) + ν·ε_X,t
+Y_t = 0.60·X_{t-1} + a_YY(t)·Y_{t-2}                + ν·λ·g_Y(W_{t-1}) + ν·ε_Y,t
+Z_t = 0.60·Y_{t-1}                    + a_ZZ(t)·Z_{t-3} + ν·λ·g_Z(W_{t-1}) + ν·ε_Z,t
 ```
 
 - `ε_X, ε_Y, ε_Z ~ N(0,1)`, mutually independent (no contemporaneous edges)
-- `α = 0.05` is the noise scaling parameter (CLI: `--alpha`); scales both innovation noise and confounding
+- `ν = 0.05` is the noise scaling parameter (CLI: `--noise-scale`); scales both innovation noise and confounding
 - `λ = 1.0` is the confounder strength relative to innovation noise (CLI: `--confounder-strength`)
 - `c_x = c_y = c_z = 0` — the VAR model's intercept term absorbs any non-zero mean from nuisance functions
 
@@ -142,13 +142,13 @@ Checking only the lag-1 cycle product (cross_effect³) is **insufficient** — t
 | 0.60 | 0.30 | **0.93** | **Yes (chosen)** |
 | 0.30 | 0.20 | 0.72 | Yes (original) |
 
-The chosen parameters (cross=0.60, self=0.30, α=0.05) give ρ = 0.93, providing comfortable stability margin.
+The chosen parameters (cross=0.60, self=0.30, ν=0.05) give ρ = 0.93, providing comfortable stability margin.
 
 ### 4.9 Estimation Variance and Autocorrelation in Edge Trajectories
 
 The edge trajectory plots show estimated coefficients fluctuating around the true values. This variance has three key properties:
 
-1. **It is estimation variance, not DGP noise.** The innovation noise is tiny (α=0.05). The fluctuations arise from finite-sample OLS estimation with `ols_window=100` observations and up to 15 parameters per equation (VAR(5) with 3 variables). For VARX, it worsens to 30 parameters from 100 observations.
+1. **It is estimation variance, not DGP noise.** The innovation noise is tiny (ν=0.05). The fluctuations arise from finite-sample OLS estimation with `ols_window=100` observations and up to 15 parameters per equation (VAR(5) with 3 variables). For VARX, it worsens to 30 parameters from 100 observations.
 
 2. **The fluctuations appear autocorrelated** even though the innovation noise ε is i.i.d. This is because adjacent rolling OLS windows share 99 out of 100 observations — each day's estimate only differs by dropping one old observation and adding one new one. The estimates therefore change slowly, producing smooth "wiggles" rather than i.i.d. jitter.
 
@@ -166,14 +166,14 @@ The primary lever for reducing estimation variance is the ratio of observations 
 | n_assets | 3 | X, Y, Z |
 | n_confounders | 3 | W1, W2, W3 |
 | p_max | 5 | True max lag is 3 |
-| ols_window | 100 | OLS training window |
-| tree_train_window | 100 | DML first-stage window |
+| ols_window | 200 | OLS training window |
+| tree_train_window | None→200 | DML first-stage window (defaults to ols_window) |
 | p_max_offset | 5 | Extra days for lag computation |
 | test_size | 20 | Grid fold size |
 | validation_days | 20 | Rolling validation window |
 | lookback_var | 105 | = ols_window + p_max_offset |
 | lookback_orvarx | 205 | = tree_train + ols + offset |
-| α (noise) | 0.05 | Innovation noise scaling |
+| ν (noise) | 0.05 | Innovation noise scaling |
 | λ (confounder_strength) | 1.0 | Nuisance scaling; increase to stress-test DML |
 | cross_effect | 0.60 | Lag-1 cycle strength |
 | a_XX_init | 0.30 | Lag-2 self-effect (X) |
@@ -395,7 +395,7 @@ forecasts = result_full.forecasts[endo_indices, :]
 ## 13. Notes
 
 - **Correlated noise**: Deferred. Independent noise chosen for clean evaluation. Confounders already create cross-sectional dependence via shared W_{t-1}→(X,Y,Z)_t. Future extension: add Σ covariance matrix.
-- **Noise sweep**: α ∈ {0.25, 0.5, 1.0, 2.0} as optional extension for SNR analysis.
+- **Noise sweep**: ν ∈ {0.25, 0.5, 1.0, 2.0} as optional extension for SNR analysis.
 - **Multi-learner Phase 1**: Supports `--learner all` to run lgbm, xgboost, rf, extra_trees (4 learners × 3 obs × 2 methods = 24 runs).
 - **F1/recall/precision**: Extensible by thresholding estimated coefficients to binary edge presence. Noted as potential future tuning objective.
 - **TabPFN Phase 2**: GPU-accelerated first-stage via `fit_oraclevarx_tabpfn`. Batch size heuristic generalized with `n_assets` parameter for smaller problems.
