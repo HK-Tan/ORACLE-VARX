@@ -175,9 +175,9 @@ def refit_dml_coefficients_for_day(
             Y_model.fit(controls_train, outcome_train)
             T_model.fit(controls_train, treatment_train)
 
-        # Predict on OLS region
-        Y_pred = Y_model.predict(controls_ols)
-        T_pred = T_model.predict(controls_ols)
+            # Predict on OLS region
+            Y_pred = Y_model.predict(controls_ols)
+            T_pred = T_model.predict(controls_ols)
 
         # Compute residuals
         R_Y = torch.from_numpy((outcome_ols - Y_pred).astype(np.float32)).to(Y.device)

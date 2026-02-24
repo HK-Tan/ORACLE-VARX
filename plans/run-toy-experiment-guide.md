@@ -109,72 +109,13 @@ python scripts/run_toy_benchmark.py --phase 0 --no-show
 
 Runs all 8 OLS methods sequentially. Takes ~6 seconds on a laptop.
 
-### Step 3: Run Phase 1 (DML methods) — single process, always sequential
+### Step 3: Run Phase 1 (DML methods)
 
-`run_toy_benchmark.py --phase 1` runs DML methods in a **single process**. It loops over learners (outer) then obs levels (inner), all **sequentially**. Each (learner, obs) pair produces 2 methods: OR-VARX + ORACLE-VARX.
+Phase 1 is the slow part — it fits tree-based models for every fold/day. Each (learner, obs level) pair produces 2 methods: OR-VARX + ORACLE-VARX.
 
-**Defaults:** `--learner extra_trees`, `--obs` = all 3 levels.
+#### Orchestrator (recommended) — 4 learners in parallel
 
-```bash
-# (A) Default: 1 learner × 3 obs levels = 6 method-runs, sequential
-#     Runs: extra_trees × {all, partial_2, partial_1}
-#     Produces: OR-VARX_extra_trees_all/, ORACLE-VARX_extra_trees_all/,
-#               OR-VARX_extra_trees_partial_2/, ORACLE-VARX_extra_trees_partial_2/,
-#               OR-VARX_extra_trees_partial_1/, ORACLE-VARX_extra_trees_partial_1/
-python scripts/run_toy_benchmark.py --phase 1 --no-show
-
-# (B) 1 learner × 1 obs level = 2 method-runs, sequential
-#     Runs: extra_trees × {all}
-#     Produces: OR-VARX_extra_trees_all/, ORACLE-VARX_extra_trees_all/
-python scripts/run_toy_benchmark.py --phase 1 --obs all --no-show
-
-# (C) Specific learner + specific obs = 2 method-runs, sequential
-#     Runs: lgbm × {partial_2}
-#     Produces: OR-VARX_lgbm_partial_2/, ORACLE-VARX_lgbm_partial_2/
-python scripts/run_toy_benchmark.py --phase 1 --learner lgbm --obs partial_2 --no-show
-
-# (D) 1 learner × 3 obs levels with custom thread count = 6 method-runs, sequential
-python scripts/run_toy_benchmark.py --phase 1 --learner rf --n-jobs 4 --no-show
-```
-
-> **Avoid `--learner all`** — it runs 4 learners × 3 obs = **24 method-runs sequentially** (very slow). Use the tmux orchestrator (Step 6) instead to run learners in parallel.
-
-**Quick reference:**
-
-| Command flags | Learners | Obs levels | Method-runs | Execution |
-|--------------|----------|-----------|-------------|-----------|
-| *(defaults)* | 1 (extra_trees) | 3 | 6 | Sequential |
-| `--obs all` | 1 (extra_trees) | 1 | 2 | Sequential |
-| `--learner lgbm` | 1 (lgbm) | 3 | 6 | Sequential |
-| `--learner lgbm --obs partial_2` | 1 (lgbm) | 1 | 2 | Sequential |
-| `--learner all` | 4 | 3 | 24 | Sequential (slow!) |
-| `--learner all --obs all` | 4 | 1 | 8 | Sequential |
-
-### Step 4: Run Phase 2 (TabPFN methods, GPU)
-
-```bash
-# All obs levels (requires CUDA)
-python scripts/run_toy_benchmark.py --phase 2 --device cuda --no-show
-
-# Single obs level with custom ensemble size
-python scripts/run_toy_benchmark.py --phase 2 --obs all --device cuda --n-estimators 8 --no-show
-```
-
-Phase 2 requires a CUDA-capable GPU. The batch size heuristic auto-scales for the toy problem's smaller n_assets=3.
-
-### Step 5: Run Phase 0 + Phase 1 together
-
-```bash
-python scripts/run_toy_benchmark.py --phase all --no-show
-```
-
-This runs Phase 0 then Phase 1 (all obs levels) sequentially. Each experiment generates its own `edge_trajectories.png` and appends to the top-level `metrics_summary.csv`.
-
-### Step 6: Tmux Orchestrator (parallel Phase 1) — 4 learners in parallel
-
-The orchestrator (`run_all_toy_experiments.py`) runs **4 learners in parallel** using tmux panes. Each pane runs a single learner across all 3 obs levels sequentially. This is 4× faster than `--learner all`.
-
-**How it works:** The orchestrator launches 4 independent `run_toy_benchmark.py --phase 1 --learner {X}` commands — one per tmux pane. Each pane handles its own 3 obs levels sequentially. The 4 panes run simultaneously:
+The orchestrator launches all 4 learners in parallel tmux panes, each running all 3 obs levels sequentially within its pane:
 
 ```
 Pane 1 (lgbm):        obs=all → obs=partial_2 → obs=partial_1  (6 method-runs, sequential)
@@ -188,14 +129,14 @@ Pane 4 (extra_trees): obs=all → obs=partial_2 → obs=partial_1  (6 method-run
 Wall-clock time is ~1 pane's time (not 4×), since all 4 run concurrently.
 
 ```bash
-# Dry run — inspect the 4 commands without executing
-python scripts/run_all_toy_experiments.py --phase all --dry-run
-
-# Run Phase 0 (sequential, ~6s) then Phase 1 (4 parallel tmux panes)
+# Run everything: Phase 0 (sequential, ~6s) then Phase 1 (4 parallel tmux panes)
 python scripts/run_all_toy_experiments.py --phase all --verbose
 
 # Phase 1 only (skip OLS baselines)
 python scripts/run_all_toy_experiments.py --phase 1
+
+# Preview commands without executing
+python scripts/run_all_toy_experiments.py --phase all --dry-run
 
 # Override per-pane thread count
 python scripts/run_all_toy_experiments.py --phase 1 --n-jobs 3
@@ -203,13 +144,59 @@ python scripts/run_all_toy_experiments.py --phase 1 --n-jobs 3
 
 BLAS thread limits (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) are auto-set per pane to avoid oversubscription: `threads_per_pane = (physical_cores - 1) / 4`.
 
-**Comparison: direct vs orchestrator**
+#### Single experiment (debugging / one-off)
 
-| Approach | Command | Parallelism | Total method-runs | Wall-clock |
-|----------|---------|-------------|-------------------|------------|
-| Direct, single learner | `run_toy_benchmark.py --phase 1` | None (sequential) | 6 | ~5-10 min |
-| Direct, all learners | `run_toy_benchmark.py --phase 1 --learner all` | None (sequential) | 24 | ~20-40 min |
-| **Orchestrator** | **`run_all_toy_experiments.py --phase 1`** | **4 tmux panes** | **24** | **~5-10 min** |
+`run_toy_benchmark.py --phase 1` runs a single process, looping over learners (outer) then obs levels (inner), all **sequentially**. Useful for debugging or running a specific (learner, obs) combo.
+
+**Defaults:** `--learner extra_trees`, `--obs` = all 3 levels.
+
+```bash
+# 1 learner × 3 obs levels = 6 method-runs, sequential
+#   Produces: OR-VARX_extra_trees_{all,partial_2,partial_1}/,
+#             ORACLE-VARX_extra_trees_{all,partial_2,partial_1}/
+python scripts/run_toy_benchmark.py --phase 1 --no-show
+
+# 1 learner × 1 obs level = 2 method-runs, sequential
+#   Produces: OR-VARX_extra_trees_all/, ORACLE-VARX_extra_trees_all/
+python scripts/run_toy_benchmark.py --phase 1 --obs all --no-show
+
+# Specific learner + specific obs = 2 method-runs, sequential
+#   Produces: OR-VARX_lgbm_partial_2/, ORACLE-VARX_lgbm_partial_2/
+python scripts/run_toy_benchmark.py --phase 1 --learner lgbm --obs partial_2 --no-show
+
+# Custom thread count
+python scripts/run_toy_benchmark.py --phase 1 --learner rf --n-jobs 4 --no-show
+
+# Phase 0 + Phase 1 together (OLS baselines then DML, all sequential)
+python scripts/run_toy_benchmark.py --phase all --no-show
+```
+
+> **Avoid `--learner all`** — it runs 4 learners × 3 obs = 24 method-runs **sequentially** (very slow). Use the orchestrator instead.
+
+#### Quick reference
+
+| Command | Learners | Obs levels | Method-runs | Execution |
+|---------|----------|-----------|-------------|-----------|
+| `run_all_toy_experiments.py --phase 1` | **4 (parallel tmux)** | **3 per pane** | **24** | **4 panes parallel** |
+| `run_all_toy_experiments.py --phase all` | **4 (parallel tmux)** | **3 per pane** | **8 OLS + 24 DML** | **Phase 0 seq, Phase 1 parallel** |
+| `run_toy_benchmark.py --phase 1` | 1 (extra_trees) | 3 | 6 | Sequential |
+| `run_toy_benchmark.py --phase 1 --obs all` | 1 (extra_trees) | 1 | 2 | Sequential |
+| `run_toy_benchmark.py --phase 1 --learner lgbm` | 1 (lgbm) | 3 | 6 | Sequential |
+| `run_toy_benchmark.py --phase 1 --learner lgbm --obs partial_2` | 1 (lgbm) | 1 | 2 | Sequential |
+| `run_toy_benchmark.py --phase 1 --learner all` | 4 | 3 | 24 | Sequential (slow!) |
+| `run_toy_benchmark.py --phase all` | 1 (extra_trees) | 3 | 8 OLS + 6 DML | Sequential |
+
+### Step 4: Run Phase 2 (TabPFN methods, GPU)
+
+```bash
+# All obs levels (requires CUDA)
+python scripts/run_toy_benchmark.py --phase 2 --device cuda --no-show
+
+# Single obs level with custom ensemble size
+python scripts/run_toy_benchmark.py --phase 2 --obs all --device cuda --n-estimators 8 --no-show
+```
+
+Phase 2 requires a CUDA-capable GPU. The batch size heuristic auto-scales for the toy problem's smaller n_assets=3.
 
 ## 7. CLI Reference
 
