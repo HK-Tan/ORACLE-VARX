@@ -88,6 +88,8 @@ source .venv/bin/activate
 python scripts/generate_toy_data.py
 ```
 
+If you are re-running/reproducing the results, **you do not have to run this!**.
+
 This creates `dataset/toy/` with:
 - `Y.csv` — endogenous variables (3000 × 3)
 - `W.csv` — confounders (3000 × 3)
