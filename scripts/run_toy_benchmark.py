@@ -269,6 +269,12 @@ def compute_lag_metrics(
         metrics[f"{rname}_lag_rmse"] = float(np.sqrt(np.mean(diff[in_regime] ** 2)))
 
     metrics["overall_lag_rmse"] = float(np.sqrt(np.mean(diff ** 2)))
+
+    # Spearman rank correlation between estimated and true lag order
+    from scipy import stats as _stats
+    rho, _ = _stats.spearmanr(p_optimal.astype(float), p_true.astype(float))
+    metrics["spearman_rho"] = float(rho)
+
     return metrics
 
 
@@ -500,11 +506,19 @@ def evaluate_and_save(
     # --- Save result ---
     result.save(str(exp_dir / "result.pt"))
 
-    # --- Lag analysis plot (with absolute time indices) ---
+    # --- Lag analysis plot (with absolute time indices and true lag overlay) ---
     time_indices = np.array([parse_time_index(d) for d in result.dates])
+    A_np = A_true.numpy()
+    p_true_arr = np.ones(len(time_indices), dtype=int)
+    for i, t in enumerate(time_indices):
+        for k in range(A_np.shape[1] - 1, -1, -1):
+            if np.any(np.abs(A_np[t, k]) > 1e-8):
+                p_true_arr[i] = k + 1
+                break
     plot_lag_analysis(
         p_optimal=result.p_optimal.cpu().numpy(),
         dates=time_indices,
+        p_true=p_true_arr,
         title=f"Lag Analysis — {exp_name}",
         save_path=str(exp_dir / "lag_analysis.png"),
         show_plot=show_plots,

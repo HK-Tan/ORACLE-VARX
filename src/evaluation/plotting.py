@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
 from matplotlib.ticker import MaxNLocator
+from scipy import stats
 from typing import Dict, List, Tuple, Optional, Union
 
 
@@ -58,6 +59,7 @@ def plot_lag_analysis(
     p_optimal: Union[np.ndarray, pd.Series],
     significance_level: float = None,
     dates: Union[pd.DatetimeIndex, np.ndarray] = None,
+    p_true: Union[np.ndarray, pd.Series] = None,
     title: str = None,
     save_path: str = None,
     show_plot: bool = True,
@@ -73,6 +75,8 @@ def plot_lag_analysis(
         significance_level: Optional significance level used (for title annotation).
         dates: Date indices corresponding to p_optimal values.
             If None, uses day indices (0, 1, 2, ...).
+        p_true: Optional array of true lag values. When provided, overlaid
+            as a black step function and Spearman rho is annotated.
         title: Custom title. If None, uses default title.
         save_path: Path to save the plot. If None, plot is not saved.
         show_plot: Whether to display the plot interactively.
@@ -86,6 +90,8 @@ def plot_lag_analysis(
     # Convert to numpy if pandas Series
     if isinstance(p_optimal, pd.Series):
         p_optimal = p_optimal.values
+    if isinstance(p_true, pd.Series):
+        p_true = p_true.values
 
     # Set x-axis values
     if dates is not None:
@@ -97,14 +103,32 @@ def plot_lag_analysis(
 
     plt.figure(figsize=figsize)
 
+    # Overlay true lag order if provided
+    if p_true is not None:
+        plt.step(x_values, p_true, where="mid", linewidth=2.5, color="black",
+                 label=r"$p^*(t)$ (true)", zorder=4)
+
     # Use step plot for cleaner visualization of discrete lag values
-    plt.step(x_values, p_optimal, where="mid", linewidth=2, alpha=0.8, color="steelblue")
+    plt.step(x_values, p_optimal, where="mid", linewidth=2, alpha=0.8, color="steelblue",
+             label=r"$\hat{p}_t$ (estimated)")
 
     # Add scatter points to emphasize individual data points
     plt.scatter(x_values, p_optimal, alpha=0.7, s=30, color="darkblue", zorder=5)
 
     # Fill area under the step plot
     plt.fill_between(x_values, p_optimal, step="mid", alpha=0.3, color="lightblue")
+
+    # Annotate Spearman rho if true lag provided
+    if p_true is not None:
+        rho, pval = stats.spearmanr(p_optimal.astype(float), p_true.astype(float))
+        plt.text(
+            0.98, 0.95,
+            f"Spearman $\\rho = {rho:.2f}$",
+            transform=plt.gca().transAxes,
+            fontsize=13, ha="right", va="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.8),
+        )
+        plt.legend(loc="upper left", fontsize=11)
 
     plt.xlabel(x_label, fontsize=12)
     plt.ylabel("p_optimal Value", fontsize=12)
