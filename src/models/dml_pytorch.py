@@ -579,6 +579,7 @@ def fit_orvarx_core(
     learner_name: str = 'xgboost',
     n_jobs: int = -1,
     verbose: bool = False,
+    store_per_p_coefs: bool = False,
 ) -> CoreResult:
     """Core OR-VARX DML computation without validation trimming or p-selection.
 
@@ -670,6 +671,10 @@ def fit_orvarx_core(
     forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max, device=device, dtype=dtype)
     coefficients = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
     standard_errors = torch.zeros(n_total_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
+
+    per_p_coefs = None
+    if store_per_p_coefs:
+        per_p_coefs = torch.zeros(n_total_test_days, p_max, p_max, n_assets, n_assets, device=device, dtype=dtype)
 
     # Storage for residuals and forecast predictions (matches TabPFN pattern)
     R_Y_all: Dict[int, np.ndarray] = {}
@@ -769,6 +774,9 @@ def fit_orvarx_core(
                         theta_reshaped = theta_all_batch[i].view(p, n_assets, n_assets).transpose(-2, -1)
                         coefficients[day_rel_idx, :p, :, :] = theta_reshaped
 
+                        if per_p_coefs is not None:
+                            per_p_coefs[day_rel_idx, p - 1, :p, :, :] = theta_reshaped
+
                         se_reshaped = se_all[i].view(p, n_assets, n_assets).transpose(-2, -1)
                         standard_errors[day_rel_idx, :p, :, :] = se_reshaped
 
@@ -825,7 +833,7 @@ def fit_orvarx_core(
     total_time = time.time() - t0
     print(f"  Core DML complete in {total_time:.1f}s")
 
-    return forecasts_all, coefficients, standard_errors, actuals
+    return forecasts_all, coefficients, standard_errors, actuals, per_p_coefs
 
 
 def fit_orvarx_batched(
@@ -843,6 +851,7 @@ def fit_orvarx_batched(
     return_se: bool = False,
     core_results: Optional[CoreResult] = None,
     return_core: bool = False,
+    store_per_p_coefs: bool = False,
 ) -> Union[VARXResult, Tuple[VARXResult, torch.Tensor], Tuple[VARXResult, CoreResult], Tuple[VARXResult, torch.Tensor, CoreResult]]:
     """Fit OR-VARX model using vectorized/batched operations.
 
@@ -933,10 +942,11 @@ def fit_orvarx_batched(
     # Call core function for DML computation (returns ALL test days, no trimming)
     # =========================================================================
     if core_results is not None:
-        forecasts_all, coefficients, standard_errors, actuals = core_results
+        forecasts_all, coefficients, standard_errors, actuals = core_results[:4]
+        per_p_coefs_raw = core_results[4] if len(core_results) > 4 else None
         print("  Using pre-computed core results (skipping DML first stage)")
     else:
-        forecasts_all, coefficients, standard_errors, actuals = fit_orvarx_core(
+        forecasts_all, coefficients, standard_errors, actuals, per_p_coefs_raw = fit_orvarx_core(
             Y=Y,
             W=W,
             p_max=p_max,
@@ -944,6 +954,7 @@ def fit_orvarx_batched(
             learner_name=learner_name,
             n_jobs=n_jobs,
             verbose=verbose,
+            store_per_p_coefs=store_per_p_coefs,
         )
 
     # Save raw core results for potential return
@@ -990,11 +1001,12 @@ def fit_orvarx_batched(
     )
 
     # Build return value based on what was requested
+    core_tuple = (forecasts_all_raw, coefficients_raw, standard_errors_raw, actuals, per_p_coefs_raw)
     if return_se and return_core:
-        return result, standard_errors_output, (forecasts_all_raw, coefficients_raw, standard_errors_raw, actuals)
+        return result, standard_errors_output, core_tuple
     elif return_se:
         return result, standard_errors_output
     elif return_core:
-        return result, (forecasts_all_raw, coefficients_raw, standard_errors_raw, actuals)
+        return result, core_tuple
     else:
         return result

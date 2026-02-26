@@ -199,6 +199,7 @@ def batch_var_all_days(
     p_max: int,
     lookback: int,
     chunk_size: Optional[int] = None,
+    store_per_p_coefs: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Batched VAR estimation for all days and all lag orders.
 
@@ -244,6 +245,10 @@ def batch_var_all_days(
     forecasts = torch.zeros(n_test_days, n_assets, p_max, device=device, dtype=dtype)
     coefficients = torch.zeros(n_test_days, p_max, n_assets, n_assets, device=device, dtype=dtype)
 
+    per_p_coefs = None
+    if store_per_p_coefs:
+        per_p_coefs = torch.zeros(n_test_days, p_max, p_max, n_assets, n_assets, device=device, dtype=dtype)
+
     # Build sliding windows for all test days using unfold (vectorized)
     # Y.unfold(0, lookback, 1) creates sliding windows along dimension 0
     # Y shape: (n_days, n_assets)
@@ -285,11 +290,14 @@ def batch_var_all_days(
         # Store coefficients
         coefficients[:, :p, :, :] = A_matrices
 
+        if per_p_coefs is not None:
+            per_p_coefs[:, p - 1, :p, :, :] = A_matrices
+
         # Build prediction features and generate forecasts
         X_pred = build_pred_features(windows, p)  # (batch, 1, n_features)
         forecasts[:, :, p - 1] = torch.bmm(X_pred, beta).squeeze(1)
 
-    return forecasts, coefficients
+    return forecasts, coefficients, per_p_coefs
 
 
 def select_optimal_p(
@@ -471,6 +479,7 @@ def fit_var(
     validation_days: int = 20,
     asset_names: Optional[List[str]] = None,
     dates: Optional[List[str]] = None,
+    store_per_p_coefs: bool = False,
 ) -> VARXResult:
     """Fit plain VAR model with optimal p selection.
 
@@ -541,7 +550,9 @@ def fit_var(
         raise ValueError(f"Expected {n_test_days} dates, got {len(dates)}")
 
     # Step 1: Batched VAR estimation
-    forecasts_all, coefficients = batch_var_all_days(Y, p_max, lookback)
+    forecasts_all, coefficients, per_p_coefs = batch_var_all_days(
+        Y, p_max, lookback, store_per_p_coefs=store_per_p_coefs,
+    )
     # forecasts_all: (n_test_days, n_assets, p_max)
     # coefficients: (n_test_days, p_max, n_assets, n_assets)
 
@@ -570,7 +581,7 @@ def fit_var(
     forecasts = forecasts.T  # (n_assets, n_output_days)
     forecasts_all = forecasts_all.transpose(0, 1)[:, validation_days:, :]  # (n_assets, n_output_days, p_max)
 
-    return VARXResult(
+    result = VARXResult(
         forecasts=forecasts,
         forecasts_all=forecasts_all,
         p_optimal=p_optimal,
@@ -580,3 +591,8 @@ def fit_var(
         confounder_names=[],  # Empty for plain VAR
         dates=dates_output,
     )
+
+    if store_per_p_coefs:
+        per_p_coefs = per_p_coefs[validation_days:]
+        return result, per_p_coefs
+    return result
