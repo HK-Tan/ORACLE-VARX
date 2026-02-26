@@ -207,10 +207,10 @@ def fit_oraclevarx_batched(
 
     # Call fit_orvarx_core() - returns ALL test days, no trimming
     if core_results is not None:
-        forecasts_all_batched_raw, theta_all, SE_all, actuals = core_results
+        forecasts_all_batched_raw, theta_all, SE_all, actuals = core_results[:4]
         print("    Using pre-computed core results (skipping DML first stage)")
     else:
-        forecasts_all_batched_raw, theta_all, SE_all, actuals = fit_orvarx_core(
+        core = fit_orvarx_core(
             Y=Y,
             W=W,
             p_max=p_max,
@@ -219,6 +219,7 @@ def fit_oraclevarx_batched(
             n_jobs=n_jobs,
             verbose=verbose,
         )
+        forecasts_all_batched_raw, theta_all, SE_all, actuals = core[:4]
 
     # Shapes from core:
     # forecasts_all_batched_raw: (n_total_test_days, n_assets, p_max)

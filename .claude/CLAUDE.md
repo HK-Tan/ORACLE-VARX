@@ -13,5 +13,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Always parallelize independent work** - launch multiple Task agents in a single message when tasks don't depend on each other.
 
-Only perform simple, quick operations (single file reads, small edits) directly in the main conversation.
-
+To quickly navigate through the codebase, take a look at /Users/maxtanhk/Desktop/Codes/ORACLE-VARX/tex-files/codebase-guide.md

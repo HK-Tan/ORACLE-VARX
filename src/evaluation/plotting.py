@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 from matplotlib.ticker import MaxNLocator
 from typing import Dict, List, Tuple, Optional, Union
 
@@ -136,6 +137,103 @@ def plot_lag_analysis(
         plt.show()
     else:
         plt.close()
+
+
+def plot_lag_analysis_with_volatility(
+    p_optimal: Union[np.ndarray, pd.Series],
+    spy_volatility: pd.Series,
+    dates: Union[pd.DatetimeIndex, np.ndarray] = None,
+    significance_level: float = None,
+    vol_window: int = 21,
+    title: str = None,
+    save_path: str = None,
+    show_plot: bool = True,
+    figsize: Tuple[int, int] = (15, 6),
+) -> None:
+    """Plot optimal lag values over time with SPY realized volatility overlay.
+
+    Creates a dual-axis plot with p_optimal as a step plot on the left axis
+    and SPY realized volatility as a dashed line on the right axis.
+
+    Args:
+        p_optimal: Array of optimal lag values for each day.
+        spy_volatility: Pre-computed SPY realized volatility with DatetimeIndex.
+        dates: Date indices corresponding to p_optimal values.
+        significance_level: Optional significance level used (for title annotation).
+        vol_window: Rolling window used for volatility (for label only).
+        title: Custom title. If None, uses default title.
+        save_path: Path to save the plot. If None, plot is not saved.
+        show_plot: Whether to display the plot interactively.
+        figsize: Figure size as (width, height) in inches.
+    """
+    # Convert to numpy if pandas Series
+    if isinstance(p_optimal, pd.Series):
+        p_optimal = p_optimal.values
+
+    # Set x-axis values
+    if dates is not None:
+        x_values = dates
+        x_label = "Date"
+    else:
+        x_values = np.arange(len(p_optimal))
+        x_label = "Day"
+
+    fig, ax1 = plt.subplots(figsize=figsize)
+
+    # Left axis: p_optimal step plot (matching existing style)
+    step_line = ax1.step(
+        x_values, p_optimal, where="mid", linewidth=2, alpha=0.8,
+        color="steelblue", label=r"$p_{opt}$", zorder=3,
+    )
+    ax1.scatter(x_values, p_optimal, alpha=0.7, s=30, color="darkblue", zorder=5)
+    ax1.fill_between(x_values, p_optimal, step="mid", alpha=0.3, color="lightblue")
+
+    ax1.set_xlabel(x_label, fontsize=12)
+    ax1.set_ylabel("p_optimal Value", fontsize=12)
+    ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax1.grid(True, alpha=0.3, zorder=0)
+
+    # Right axis: SPY realized volatility
+    ax2 = ax1.twinx()
+    vol_line, = ax2.plot(
+        spy_volatility.index, spy_volatility.values,
+        linestyle="--", color="tab:orange", linewidth=1.6, alpha=0.9,
+        label=f"SPY {vol_window}d Realized Vol", zorder=1,
+    )
+    ax2.set_ylabel("Market Realized Vol (%)", fontsize=12)
+    ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=1))
+
+    # Set title
+    if title is not None:
+        ax1.set_title(title, fontsize=14)
+    elif significance_level is not None:
+        ax1.set_title(
+            f"p_optimal Values Over Time\n(Significance Level={significance_level})",
+            fontsize=14,
+        )
+    else:
+        ax1.set_title("p_optimal Values Over Time", fontsize=14)
+
+    # Format x-axis for dates
+    if dates is not None and hasattr(dates, "dtype") and np.issubdtype(dates.dtype, np.datetime64):
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax1.xaxis.set_major_locator(mdates.YearLocator(2))
+        plt.xticks(rotation=30, ha="right")
+
+    # Combined legend
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left", fontsize=10)
+
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def plot_strategy_comparison(

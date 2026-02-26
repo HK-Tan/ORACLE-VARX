@@ -104,6 +104,30 @@ def parse_time_index(date_str: str) -> int:
 # Metrics computation
 # ---------------------------------------------------------------------------
 
+def extract_per_p_coefficients(
+    per_p_coefs: torch.Tensor,
+    p_optimal: torch.Tensor,
+) -> torch.Tensor:
+    """For each day d, extract the full coefficient matrix from VAR(p_optimal[d]).
+
+    Args:
+        per_p_coefs: shape (n_days, p_max, p_max, n_assets, n_assets)
+        p_optimal: shape (n_days,) — 1-indexed lag for each day
+
+    Returns:
+        shape (n_days, p_max, n_assets, n_assets) — coefficients from VAR(p_optimal[d])
+    """
+    n_days = per_p_coefs.shape[0]
+    p_max = per_p_coefs.shape[1]
+    result = torch.zeros(n_days, p_max, *per_p_coefs.shape[3:],
+                         device=per_p_coefs.device, dtype=per_p_coefs.dtype)
+    for d in range(n_days):
+        p = int(p_optimal[d].item())
+        if 1 <= p <= p_max:
+            result[d] = per_p_coefs[d, p - 1]
+    return result
+
+
 def compute_edge_metrics(
     result_coefs: torch.Tensor,
     result_dates: List[str],
@@ -402,6 +426,7 @@ def evaluate_and_save(
     output_dir: Path,
     config: GridConfig,
     coef_result: Optional[VARXResult] = None,
+    coefficients_override: Optional[torch.Tensor] = None,
     Y_for_refit: Optional[torch.Tensor] = None,
     W_for_refit: Optional[torch.Tensor] = None,
     refit_asset_names: Optional[List[str]] = None,
@@ -419,7 +444,9 @@ def evaluate_and_save(
         obs_label: e.g. "none", "all", "partial_2"
         output_dir: base results directory
         config: GridConfig used
-        coef_result: VARXResult with .coefficients for ACLE/ORACLE methods
+        coef_result: VARXResult with .coefficients for heatmaps/plots
+        coefficients_override: lag-masked coefficient tensor for edge metrics
+                              (used by ACLE/ORACLE methods)
         Y_for_refit: Y tensor for coefficient refitting
         W_for_refit: W tensor for DML refitting (None for OLS methods)
         refit_asset_names: names for refit plots (defaults to ENDO_NAMES)
@@ -437,15 +464,20 @@ def evaluate_and_save(
     exp_dir = output_dir / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine which result has coefficients
+    # For edge metrics: use override (lag-masked) if provided, else result's own
     has_coefs = isinstance(result, VARXResult)
-    coef_source = result if has_coefs else coef_result
+    # For heatmaps / per-p plots: need VARXResult methods
+    varx_source = result if has_coefs else coef_result
 
     # --- Edge metrics ---
     edge_metrics = {}
-    if coef_source is not None and hasattr(coef_source, "coefficients"):
+    if coefficients_override is not None:
         edge_metrics = compute_edge_metrics(
-            coef_source.coefficients, coef_source.dates, A_true
+            coefficients_override, result.dates, A_true
+        )
+    elif has_coefs:
+        edge_metrics = compute_edge_metrics(
+            result.coefficients, result.dates, A_true
         )
 
     # --- Forecast metrics ---
@@ -486,20 +518,26 @@ def evaluate_and_save(
     )
 
     # --- Edge trajectory plot (single method, true vs estimated) ---
-    if coef_source is not None and hasattr(coef_source, "coefficients"):
-        single_result = {exp_name: (coef_source.coefficients, coef_source.dates)}
+    # Use masked coefficients for trajectory if available, else base model's
+    if coefficients_override is not None:
+        single_result = {exp_name: (coefficients_override, result.dates)}
+        plot_edge_trajectories(
+            single_result, A_true, obs_label,
+            save_path=str(exp_dir / "edge_trajectories.png"),
+        )
+    elif varx_source is not None and hasattr(varx_source, "coefficients"):
+        single_result = {exp_name: (varx_source.coefficients, varx_source.dates)}
         plot_edge_trajectories(
             single_result, A_true, obs_label,
             save_path=str(exp_dir / "edge_trajectories.png"),
         )
 
-    # --- Heatmaps (need coefficients) ---
-    if coef_source is not None and hasattr(coef_source, "coefficients"):
-        target_days = get_target_days(coef_source)
+    # --- Heatmaps (need VARXResult methods) ---
+    if varx_source is not None and hasattr(varx_source, "coefficients"):
+        target_days = get_target_days(varx_source)
         for day_label, day_idx in target_days:
-            # Map day_idx from coef_source to the right index
-            heatmap_df = coef_source.get_coefficient_heatmap_matrix(day_idx=day_idx)
-            date_str = coef_source.dates[day_idx]
+            heatmap_df = varx_source.get_coefficient_heatmap_matrix(day_idx=day_idx)
+            date_str = varx_source.dates[day_idx]
             plot_coefficient_heatmap(
                 heatmap_df,
                 title=f"{exp_name} — {day_label} (t={parse_time_index(date_str)})",
@@ -508,12 +546,12 @@ def evaluate_and_save(
             )
 
     # --- Per-p coefficient evolution ---
-    if coef_source is not None and Y_for_refit is not None:
-        target_days = get_target_days(coef_source)
+    if varx_source is not None and Y_for_refit is not None:
+        target_days = get_target_days(varx_source)
         is_dml = W_for_refit is not None
         for day_label, day_idx in target_days:
-            p_star = int(coef_source.p_optimal[day_idx].item())
-            date_str = coef_source.dates[day_idx]
+            p_star = int(varx_source.p_optimal[day_idx].item())
+            date_str = varx_source.dates[day_idx]
             t_abs = parse_time_index(date_str)
 
             if p_star < 1:
@@ -579,11 +617,12 @@ def run_phase0(
     # ---- 1. VAR (no confounders) ----
     print("\n[Phase 0] Fitting VAR (no confounders)...")
     t0 = time.time()
-    var_result = fit_var(
+    var_result, per_p_var = fit_var(
         Y=Y, p_max=p_max, config=config,
         validation_days=validation_days,
         asset_names=ENDO_NAMES,
         dates=dates[lookback_var:],
+        store_per_p_coefs=True,
     )
     print(f"  VAR done in {time.time() - t0:.1f}s, output days: {len(var_result.dates)}")
 
@@ -605,9 +644,11 @@ def run_phase0(
     )
     print(f"  ACLE-VAR done in {time.time() - t0:.1f}s, output days: {len(acle_var_result.dates)}")
 
+    extracted_coefs = extract_per_p_coefficients(per_p_var, acle_var_result.p_optimal)
     m = evaluate_and_save(
         acle_var_result, Y, A_true, "ACLE-VAR", "none", RESULTS_DIR, config,
-        coef_result=var_result, Y_for_refit=Y, show_plots=show_plots,
+        coef_result=var_result, coefficients_override=extracted_coefs,
+        Y_for_refit=Y, show_plots=show_plots,
     )
     all_metrics.append(m)
 
@@ -625,11 +666,12 @@ def run_phase0(
         # ---- VARX ----
         print(f"[Phase 0] Fitting VARX (obs={obs_level}, n_conf={n_conf})...")
         t0 = time.time()
-        varx_full = fit_var(
+        varx_full, per_p_full = fit_var(
             Y=Y_combined, p_max=p_max, config=config,
             validation_days=validation_days,
             asset_names=combined_names,
             dates=dates[lookback_var:],
+            store_per_p_coefs=True,
         )
 
         # Slice to endogenous-only
@@ -677,9 +719,13 @@ def run_phase0(
         )
         print(f"  ACLE-VARX done in {time.time() - t0:.1f}s")
 
+        # Slice per_p to endo-only (same slicing as varx_result.coefficients)
+        per_p_endo = per_p_full[:, :, :, endo_indices, :][:, :, :, :, endo_indices]
+        extracted_coefs = extract_per_p_coefficients(per_p_endo, acle_varx_result.p_optimal)
         m = evaluate_and_save(
             acle_varx_result, Y, A_true, "ACLE-VARX", obs_level, RESULTS_DIR, config,
-            coef_result=varx_result, Y_for_refit=Y_combined,
+            coef_result=varx_result, coefficients_override=extracted_coefs,
+            Y_for_refit=Y_combined,
             refit_asset_names=combined_names, show_plots=show_plots,
         )
         all_metrics.append(m)
@@ -742,6 +788,7 @@ def run_phase1(
                 n_jobs=n_jobs,
                 verbose=verbose,
                 return_core=True,
+                store_per_p_coefs=True,
             )
             print(f"  OR-VARX done in {time.time() - t0:.1f}s, output days: {len(orvarx_result.dates)}")
 
@@ -772,9 +819,13 @@ def run_phase1(
             )
             print(f"  ORACLE-VARX done in {time.time() - t0:.1f}s, output days: {len(oracle_result.dates)}")
 
+            # Extract per_p from core_results (5th element, untrimmed)
+            per_p_raw = core_results[4]  # shape (n_total_test_days, p_max, p_max, n_assets, n_assets)
+            per_p_trimmed = per_p_raw[validation_days:]  # trim to output days
+            extracted_coefs = extract_per_p_coefficients(per_p_trimmed, oracle_result.p_optimal)
             m = evaluate_and_save(
                 oracle_result, Y, A_true, oracle_method, obs_level, RESULTS_DIR, config,
-                coef_result=orvarx_result,
+                coef_result=orvarx_result, coefficients_override=extracted_coefs,
                 Y_for_refit=Y, W_for_refit=W_obs_t,
                 learner_name=learner_name, n_jobs=n_jobs, show_plots=show_plots,
             )
@@ -830,13 +881,15 @@ def run_phase2(
             n_estimators=n_estimators,
             device=device,
             verbose=verbose,
+            store_per_p_coefs=True,
         )
 
         if result_tuple is None:
             print(f"  TabPFN returned None for obs={obs_level}, skipping")
             continue
 
-        orvarx_result, oracle_result = result_tuple
+        orvarx_result, oracle_result = result_tuple[0], result_tuple[1]
+        per_p_coefs_tabpfn = result_tuple[2] if len(result_tuple) > 2 else None
         print(f"  TabPFN done in {time.time() - t0:.1f}s, output days: {len(orvarx_result.dates)}")
 
         # Move results back to CPU for evaluation
@@ -851,9 +904,16 @@ def run_phase2(
         all_metrics.append(m)
 
         # ORACLE-VARX-TabPFN
+        if per_p_coefs_tabpfn is not None:
+            extracted_coefs = extract_per_p_coefficients(per_p_coefs_tabpfn.cpu(), oracle_result.p_optimal)
+        else:
+            extracted_coefs = extract_per_p_coefficients(
+                torch.zeros(len(oracle_result.dates), p_max, p_max, N_ENDO, N_ENDO),
+                oracle_result.p_optimal,
+            )
         m = evaluate_and_save(
             oracle_result, Y_cpu, A_true, "ORACLE-VARX-TabPFN", obs_level, RESULTS_DIR, config,
-            coef_result=orvarx_result,
+            coef_result=orvarx_result, coefficients_override=extracted_coefs,
             Y_for_refit=Y_cpu, W_for_refit=torch.from_numpy(W_obs),
             show_plots=show_plots,
         )

@@ -181,7 +181,8 @@ from src.models.var_pytorch import rolling_alpha_selection, select_optimal_p
 def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                     n_total_test_days, n_assets, p_max,
                     ols_window, batch_chunk_size, lookback,
-                    dtype_str, verbose, ols_device):
+                    dtype_str, verbose, ols_device,
+                    store_per_p_coefs=False):
     """Run Phase 4 OLS.
 
     After TabPFN's heavy GPU usage in Phase 3 (58.5 GB peak, 10 rounds of
@@ -213,6 +214,11 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                             dtype=dtype)
     SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
                          dtype=dtype)
+
+    per_p_coefs = None
+    if store_per_p_coefs:
+        per_p_coefs = torch.zeros(n_total_test_days, p_max, p_max, n_assets, n_assets,
+                                  dtype=dtype)
 
     for p in range(1, p_max + 1):
         if p not in R_Y_all:
@@ -255,8 +261,10 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
             for i in range(n_windows):
                 day_rel_idx = i + offset
                 if 0 <= day_rel_idx < n_total_test_days:
-                    theta_all[day_rel_idx, :p, :, :] = \
-                        theta_cpu[i].view(p, n_assets, n_assets).transpose(-2, -1)
+                    reshaped = theta_cpu[i].view(p, n_assets, n_assets).transpose(-2, -1)
+                    theta_all[day_rel_idx, :p, :, :] = reshaped
+                    if per_p_coefs is not None:
+                        per_p_coefs[day_rel_idx, p - 1, :p, :, :] = reshaped
                     SE_all[day_rel_idx, :p, :, :] = \
                         se_batch[i].view(p, n_assets, n_assets).transpose(-2, -1)
 
@@ -272,6 +280,8 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
             torch.cuda.empty_cache()
 
     # Return as numpy — already on CPU
+    if store_per_p_coefs:
+        return theta_all.numpy(), SE_all.numpy(), per_p_coefs.numpy()
     return theta_all.numpy(), SE_all.numpy()
 
 
@@ -473,6 +483,7 @@ def fit_oraclevarx_tabpfn(
     target_vram_pct: float = 0.65,
     probe: bool = False,
     phase4_ols_device: str = "cuda",
+    store_per_p_coefs: bool = False,
 ) -> Optional[Tuple[VARXResult, ORACLEVARXResult]]:
     """Fit ORACLE-VARX using batched TabPFN for first-stage estimation.
 
@@ -947,24 +958,34 @@ def fit_oraclevarx_tabpfn(
     if phase4_ols_device == "cuda":
         ctx = mp.get_context('spawn')
         with ctx.Pool(1) as pool:
-            theta_np, SE_np = pool.apply(
+            ols_result = pool.apply(
                 _run_ols_phase4,
                 (R_Y_all, R_T_all, first_residual_row,
                  n_total_test_days, n_assets, p_max,
                  ols_window, config.batch_chunk_size, lookback,
-                 dtype_str, verbose, phase4_ols_device)
+                 dtype_str, verbose, phase4_ols_device,
+                 store_per_p_coefs)
             )
     else:
-        theta_np, SE_np = _run_ols_phase4(
+        ols_result = _run_ols_phase4(
             R_Y_all, R_T_all, first_residual_row,
             n_total_test_days, n_assets, p_max,
             ols_window, config.batch_chunk_size, lookback,
-            dtype_str, verbose, phase4_ols_device
+            dtype_str, verbose, phase4_ols_device,
+            store_per_p_coefs=store_per_p_coefs,
         )
+
+    theta_np, SE_np = ols_result[0], ols_result[1]
+    per_p_coefs_np = ols_result[2] if len(ols_result) > 2 else None
 
     # Convert results to GPU tensors for Phase 5
     theta_all = torch.from_numpy(theta_np).to(device=dev, dtype=dtype)
     SE_all = torch.from_numpy(SE_np).to(device=dev, dtype=dtype)
+
+    per_p_coefs_tensor = None
+    if per_p_coefs_np is not None:
+        per_p_coefs_tensor = torch.from_numpy(per_p_coefs_np).to(device=dev, dtype=dtype)
+        per_p_coefs_tensor = per_p_coefs_tensor[validation_days:]  # trim to output days
     forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max,
                                 device=dev, dtype=dtype)
 
@@ -1126,7 +1147,7 @@ def fit_oraclevarx_tabpfn(
     total_time = time.time() - t0
     print(f"  Complete! Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
 
-    return orvarx_result, ORACLEVARXResult(
+    oracle_result = ORACLEVARXResult(
         forecasts=forecasts_final,
         forecasts_all=forecasts_all_output,
         p_optimal_all=p_optimal_all_output,
@@ -1138,3 +1159,7 @@ def fit_oraclevarx_tabpfn(
         dates=dates,
         SE_all=SE_all_output,
     )
+
+    if store_per_p_coefs:
+        return orvarx_result, oracle_result, per_p_coefs_tensor
+    return orvarx_result, oracle_result

@@ -42,6 +42,4 @@ pyproject.toml
 results/**/results.pt*
 
 ## Documentation
-docs/
-notes/
-plans/run-experiment-guide.md
+tex-files/
