@@ -1,56 +1,59 @@
 # ORACLE-VARX
 
-A machine learning framework for financial time series forecasting using Vector Autoregression (VAR) combined with Double Machine Learning (DML) for causal inference.
+**OR**thogonalized **A**daptive **C**ausal **L**ag **E**stimation for **V**ector **A**uto**R**egression with e**X**ogenous variables.
 
-> **Note:** Refactoring complete. The codebase now features PyTorch batched OLS, grid-based memoization (250x speedup), and CPU-native parallelization for tree-based methods.
+A machine learning framework for financial time series forecasting that combines Vector Autoregression (VAR) with Double Machine Learning (DML) to produce orthogonalized, confounding-robust forecasts.
 
-## Methods
+## Quick Start
 
-This project implements four VAR-based analysis methods:
+Install dependencies:
 
-- **Plain VAR** - Traditional Vector Autoregression with PyTorch batched OLS
-- **OR-VARX** - Orthogonal Regression with Double Machine Learning + grid-based memoization
-- **ORACLE-VARX** - Significance-based lag selection with rolling α-selection
-- **ACLE-VARX** - VAR with significance-based selection (no DML)
+```bash
+pip install -r requirements-cpu.txt   # CPU (tree-based learners)
+pip install -r requirements-gpu.txt   # GPU (adds TabPFN + CUDA)
+```
 
-The framework supports configurable ML models (Extra Trees, Random Forest, Lasso, OLS) for outcome and treatment modeling, with parallelized execution for computational efficiency.
+## Experiments
 
-## Architecture Highlights
+The two main experiment scripts are:
 
-- **CPU for tree-based learners** - Native parallelization via `n_jobs=-1` (scikit-learn)
-- **PyTorch batched OLS** - Efficient matrix operations using `torch.bmm` and `torch.linalg.solve`
-- **Grid-based memoization** - Reduces model trainings from ~33M to ~131K (250x speedup)
-- **Vectorized significance testing** - Benjamini-Hochberg FDR correction for multiple comparisons
+### 1. Real-Data Experiment (`scripts/run_combined_experiment.py`)
 
-## Repository Structure
+Runs VAR-family methods on 9 SPDR sector ETFs with macro confounder presets (`vix`, `macro5`, `all10`). Supports OLS baselines, DML methods with tree-based learners, and backtesting with PnL evaluation.
 
-### `src/models/`
-Main model implementations:
-- `var_pytorch.py` - Batched VAR estimation
-- `dml_pytorch.py` - OR-VARX with memoization
-- `oracle_var.py` - ORACLE-VARX with rolling α-selection
-- `acle_var.py` - ACLE-VARX (significance-based, no DML)
+```bash
+# OLS baselines (no confounders)
+python scripts/run_combined_experiment.py --no-confounders --no-show
 
-### `src/modules/`
-Shared utilities:
-- `grid_config.py` - Lookback configuration
-- `batch_utils.py` - Batched OLS and BH correction
-- `factory.py` - Model factory for tree/linear regressors
+# DML methods with LightGBM first-stage
+python scripts/run_combined_experiment.py --confounders vix --learner lgbm --no-show
 
-### `scripts/`
-Usage examples demonstrating the methods.
+# Quick smoke test
+python scripts/run_combined_experiment.py --confounders vix --learner lgbm --n-days 1500 --no-show
+```
 
-### `dataset/`
-Financial time series data (2000-2020) including VIX, oil prices, interest rates, and other market indicators.
+Results are saved to `results/`.
 
-### `old-code/`
-Original implementation (preserved for reference):
-- `oracle_var_experiment.py` - Original experiment script
-- `old-modules/` - Original parallelized VAR/DML modules
+### 2. Toy Benchmark (`scripts/run_toy_benchmark.py`)
 
-## Tech Stack
+Runs a controlled synthetic benchmark with known ground-truth coefficients, 3 regime changes, and 3 confounder observability levels (`all`, `partial_2`, `partial_1`). Evaluates coefficient recovery, edge detection, and forecast accuracy.
 
-- **PyTorch** - Batched OLS operations
-- **scikit-learn** - Tree-based methods (Extra Trees, Random Forest) with CPU parallelization
-- **pandas / numpy** - Data manipulation
-- **statsmodels** - Statistical tests and diagnostics
+```bash
+# Phase 0: OLS baselines (~6s)
+python scripts/run_toy_benchmark.py --phase 0 --no-show
+
+# Phase 1: DML methods (tree-based)
+python scripts/run_toy_benchmark.py --phase 1 --learner lgbm --obs all --no-show
+
+# Phase 2: TabPFN methods (GPU)
+python scripts/run_toy_benchmark.py --phase 2 --device cuda --no-show
+```
+
+Results are saved to `results-toy/`.
+
+## Further Reading
+
+For detailed execution guides, CLI references, confounder presets, output structure, and EC2/GPU setup instructions, see the plans:
+
+- [`plans/run-experiment-guide.md`](plans/run-experiment-guide.md) -- full guide for the real-data experiment
+- [`plans/run-toy-experiment-guide.md`](plans/run-toy-experiment-guide.md) -- full guide for the toy benchmark
