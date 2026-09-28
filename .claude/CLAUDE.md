@@ -13,4 +13,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Always parallelize independent work** - launch multiple Task agents in a single message when tasks don't depend on each other.
 
-To quickly navigate through the codebase, take a look at /Users/maxtanhk/Desktop/Codes/ORACLE-VARX/tex-files/codebase-guide.md
+To quickly navigate through the codebase, see `docs/explain_var_and_orvarx.md` (code walkthrough) and `docs/dml_implementation.md`.

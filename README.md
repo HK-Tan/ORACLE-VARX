@@ -53,7 +53,7 @@ Results are saved to `results-toy/`.
 
 ## Further Reading
 
-For detailed execution guides, CLI references, confounder presets, output structure, and EC2/GPU setup instructions, see the plans:
+For detailed execution guides, CLI references, confounder presets, output structure, and EC2/GPU setup instructions, see `docs/`:
 
-- [`plans/run-experiment-guide.md`](plans/run-experiment-guide.md) -- full guide for the real-data experiment
-- [`plans/run-toy-experiment-guide.md`](plans/run-toy-experiment-guide.md) -- full guide for the toy benchmark
+- [`docs/run-experiment-guide.md`](docs/run-experiment-guide.md) -- full guide for the real-data experiment
+- [`docs/run-toy-experiment-guide.md`](docs/run-toy-experiment-guide.md) -- full guide for the toy benchmark

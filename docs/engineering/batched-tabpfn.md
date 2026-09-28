@@ -81,7 +81,7 @@ per_fold_gb = 0.0171 * f + 0.1292
 batch_size = int(0.65 * VRAM_GB / per_fold_gb)
 ```
 
-See `plans/vram-considerations-tabpfn.md` for detailed tables and tuning guidance.
+See `vram-considerations-tabpfn.md` for detailed tables and tuning guidance.
 
 ## VRAM Monitoring
 
