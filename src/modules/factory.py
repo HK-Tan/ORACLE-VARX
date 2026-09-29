@@ -114,8 +114,6 @@ def get_regressor(name: str = 'xgboost', n_jobs: int = -1, **kwargs) -> Any:
                 "Also ensure HF_TOKEN environment variable is set and you have "
                 "accepted the TabPFN terms at https://huggingface.co/Prior-Labs/TabPFN"
             )
-        # n_estimators=1 reduces CPU preprocessing overhead by ~2.5x
-        # (default is 8, but preprocessing is CPU-bound and dominates runtime)
         return TabPFNRegressor(device=tabpfn_device, random_state=42, **kwargs)
 
     else:

@@ -50,6 +50,7 @@ from src.evaluation.plotting import (
     plot_coefficient_evolution_per_p,
 )
 from src.synthetic.dgp import ToyDGPConfig, get_observed_confounders
+from src.modules.batch_utils import bh_edge_discovery
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -61,6 +62,7 @@ OBS_LEVELS = ["all", "partial_2", "partial_1"]
 ENDO_NAMES = ["X", "Y", "Z"]
 N_ENDO = 3
 LEARNERS = ["lgbm", "xgboost", "rf", "extra_trees"]
+BH_EDGE_Q = 0.05  # BH level q for stage (iii) edge discovery
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +280,60 @@ def compute_lag_metrics(
     return metrics
 
 
+def compute_bh_edge_metrics(
+    coefficients: torch.Tensor,
+    standard_errors: torch.Tensor,
+    p_hat: torch.Tensor,
+    result_dates: List[str],
+    A_true: torch.Tensor,
+    window: int,
+    q: float = BH_EDGE_Q,
+) -> Dict:
+    """FDR, power and F1 of stage (iii) BH edge discovery.
+
+    Edges come from bh_edge_discovery on z = coef / SE of the p_max fit, over lags
+    1..p_hat. A true edge on day t is one whose coefficient, averaged over the
+    `window` rows before t (the rows the estimate uses), is nonzero.
+
+    Args:
+        coefficients: p_max-fit coefficients, shape (n_output_days, p_max, n_endo, n_endo)
+        standard_errors: their SEs, same shape
+        p_hat: selected lag per output day, shape (n_output_days,)
+        result_dates: date strings for each output day
+        A_true: shape (T, p_max_true, n_endo, n_endo)
+        window: rows in each estimation window (ols_window)
+        q: BH level
+
+    Returns:
+        Dict with edge_fdr (mean over days of false / max(discovered, 1)),
+        edge_power (true edges found / true edges), edge_f1, edge_n_discovered (per day).
+    """
+    edges = bh_edge_discovery(
+        coefficients.double().cpu(), standard_errors.double().cpu(), p_hat.cpu(), q
+    ).numpy()
+
+    time_indices = np.array([parse_time_index(d) for d in result_dates])
+    A_np = A_true.double().numpy()
+    cumsum = np.concatenate([np.zeros((1,) + A_np.shape[1:]), np.cumsum(A_np, axis=0)])
+    A_bar = (cumsum[time_indices] - cumsum[time_indices - window]) / window
+    k = min(A_np.shape[1], edges.shape[1])
+    truth = np.zeros(edges.shape, dtype=bool)
+    truth[:, :k] = np.abs(A_bar[:, :k]) > 1e-8
+
+    n_false = (edges & ~truth).sum(axis=(1, 2, 3))
+    n_found = edges.sum(axis=(1, 2, 3))
+    n_true_found = (edges & truth).sum()
+    n_true = (np.abs(A_bar) > 1e-8).sum()  # all true lags, even beyond the fitted p_max
+    power = n_true_found / max(n_true, 1)
+    precision = n_true_found / max(edges.sum(), 1)
+    return {
+        "edge_fdr": float(np.mean(n_false / np.maximum(n_found, 1))),
+        "edge_power": float(power),
+        "edge_f1": float(2 * precision * power / max(precision + power, 1e-12)),
+        "edge_n_discovered": float(n_found.mean()),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -404,11 +460,16 @@ def append_metrics_summary(metrics: Dict, output_dir: Path) -> None:
     csv_path = output_dir / "metrics_summary.csv"
     summary_cols = ["method", "obs_level",
                     "overall_nonzero_mae", "overall_nonzero_mse", "overall_zero_mae",
-                    "overall_forecast_mae", "overall_forecast_mse", "overall_lag_rmse"]
+                    "overall_forecast_mae", "overall_forecast_mse", "overall_lag_rmse",
+                    "spearman_rho", "edge_fdr", "edge_power", "edge_f1"]
     row = {c: metrics.get(c) for c in summary_cols}
 
     if csv_path.exists():
-        df = pd.read_csv(csv_path)
+        # skipinitialspace + strip: tolerate a hand-aligned (space-padded) CSV
+        df = pd.read_csv(csv_path, skipinitialspace=True)
+        df.columns = df.columns.str.strip()
+        for col in ("method", "obs_level"):
+            df[col] = df[col].astype(str).str.strip()
         # Remove existing row for same (method, obs_level) to avoid duplicates
         mask = (df["method"] == row["method"]) & (df["obs_level"] == row["obs_level"])
         df = df[~mask]
@@ -433,6 +494,8 @@ def evaluate_and_save(
     config: GridConfig,
     coef_result: Optional[VARXResult] = None,
     coefficients_override: Optional[torch.Tensor] = None,
+    edge_coefs: Optional[torch.Tensor] = None,
+    edge_se: Optional[torch.Tensor] = None,
     Y_for_refit: Optional[torch.Tensor] = None,
     W_for_refit: Optional[torch.Tensor] = None,
     refit_asset_names: Optional[List[str]] = None,
@@ -453,6 +516,9 @@ def evaluate_and_save(
         coef_result: VARXResult with .coefficients for heatmaps/plots
         coefficients_override: lag-masked coefficient tensor for edge metrics
                               (used by ACLE/ORACLE methods)
+        edge_coefs, edge_se: p_max-fit coefficients and SEs on the output days, shape
+                             (n_output_days, p_max, n_endo, n_endo); if both are given,
+                             BH edge FDR/power/F1 are computed with result.p_optimal
         Y_for_refit: Y tensor for coefficient refitting
         W_for_refit: W tensor for DML refitting (None for OLS methods)
         refit_asset_names: names for refit plots (defaults to ENDO_NAMES)
@@ -494,8 +560,16 @@ def evaluate_and_save(
         result.p_optimal.cpu().numpy(), result.dates, A_true
     )
 
+    # --- Stage (iii) BH edge discovery metrics ---
+    bh_metrics = {}
+    if edge_coefs is not None and edge_se is not None:
+        bh_metrics = compute_bh_edge_metrics(
+            edge_coefs, edge_se, result.p_optimal, result.dates, A_true, config.ols_window
+        )
+
     # --- Combined metrics ---
-    metrics = {**edge_metrics, **forecast_metrics, **lag_metrics, "method": method_name, "obs_level": obs_label}
+    metrics = {**edge_metrics, **forecast_metrics, **lag_metrics, **bh_metrics,
+               "method": method_name, "obs_level": obs_label}
 
     with open(exp_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -640,12 +714,6 @@ def run_phase0(
     )
     print(f"  VAR done in {time.time() - t0:.1f}s, output days: {len(var_result.dates)}")
 
-    m = evaluate_and_save(
-        var_result, Y, A_true, "VAR", "none", RESULTS_DIR, config,
-        Y_for_refit=Y, show_plots=show_plots,
-    )
-    all_metrics.append(m)
-
     # ---- 2. ACLE-VAR (no confounders) ----
     print("[Phase 0] Fitting ACLE-VAR (no confounders)...")
     t0 = time.time()
@@ -658,15 +726,28 @@ def run_phase0(
     )
     print(f"  ACLE-VAR done in {time.time() - t0:.1f}s, output days: {len(acle_var_result.dates)}")
 
+    # Edge discovery for both: p_max-fit coefficients with the SEs from ACLE-VAR's fit
+    edge_se = acle_var_result.SE_all[validation_days:]
+    m = evaluate_and_save(
+        var_result, Y, A_true, "VAR", "none", RESULTS_DIR, config,
+        edge_coefs=var_result.coefficients, edge_se=edge_se,
+        Y_for_refit=Y, show_plots=show_plots,
+    )
+    all_metrics.append(m)
+
     extracted_coefs = extract_per_p_coefficients(per_p_var, acle_var_result.p_optimal)
     m = evaluate_and_save(
         acle_var_result, Y, A_true, "ACLE-VAR", "none", RESULTS_DIR, config,
         coef_result=var_result, coefficients_override=extracted_coefs,
+        edge_coefs=var_result.coefficients, edge_se=edge_se,
         Y_for_refit=Y, show_plots=show_plots,
     )
     all_metrics.append(m)
 
     # ---- 3-8. VARX and ACLE-VARX for each obs level ----
+    # VARX is a VAR on [Y, W]. The lag is chosen on the endogenous series only
+    # (select_on), and only endo <- endo coefficients are scored, so the observed
+    # confounders never enter the metrics.
     for obs_level in OBS_LEVELS:
         W_obs, obs_names = get_observed_confounders(W_full, obs_level)
         n_conf = W_obs.shape[1]
@@ -686,6 +767,7 @@ def run_phase0(
             asset_names=combined_names,
             dates=dates[lookback_var:],
             store_per_p_coefs=True,
+            select_on=endo_indices,
         )
 
         # Slice to endogenous-only
@@ -701,13 +783,6 @@ def run_phase0(
         )
         print(f"  VARX done in {time.time() - t0:.1f}s")
 
-        m = evaluate_and_save(
-            varx_result, Y, A_true, "VARX", obs_level, RESULTS_DIR, config,
-            Y_for_refit=Y_combined, refit_asset_names=combined_names,
-            show_plots=show_plots,
-        )
-        all_metrics.append(m)
-
         # ---- ACLE-VARX ----
         print(f"[Phase 0] Fitting ACLE-VARX (obs={obs_level})...")
         t0 = time.time()
@@ -717,9 +792,10 @@ def run_phase0(
             asset_names=combined_names,
             dates=dates[lookback_var + validation_days:],
             verbose=verbose,
+            select_on=endo_indices,
         )
 
-        # Slice forecasts to endogenous-only
+        # Slice forecasts and SEs to endogenous-only
         acle_varx_result = ACLEVARXResult(
             forecasts=acle_varx_full.forecasts[endo_indices, :],
             forecasts_all=acle_varx_full.forecasts_all[endo_indices, :, :],
@@ -730,8 +806,18 @@ def run_phase0(
             asset_names=ENDO_NAMES,
             confounder_names=obs_names,
             dates=acle_varx_full.dates,
+            SE_all=acle_varx_full.SE_all[:, :, endo_indices, :][:, :, :, endo_indices],
         )
         print(f"  ACLE-VARX done in {time.time() - t0:.1f}s")
+
+        edge_se = acle_varx_result.SE_all[validation_days:]
+        m = evaluate_and_save(
+            varx_result, Y, A_true, "VARX", obs_level, RESULTS_DIR, config,
+            edge_coefs=varx_result.coefficients, edge_se=edge_se,
+            Y_for_refit=Y_combined, refit_asset_names=combined_names,
+            show_plots=show_plots,
+        )
+        all_metrics.append(m)
 
         # Slice per_p to endo-only (same slicing as varx_result.coefficients)
         per_p_endo = per_p_full[:, :, :, endo_indices, :][:, :, :, :, endo_indices]
@@ -739,6 +825,7 @@ def run_phase0(
         m = evaluate_and_save(
             acle_varx_result, Y, A_true, "ACLE-VARX", obs_level, RESULTS_DIR, config,
             coef_result=varx_result, coefficients_override=extracted_coefs,
+            edge_coefs=varx_result.coefficients, edge_se=edge_se,
             Y_for_refit=Y_combined,
             refit_asset_names=combined_names, show_plots=show_plots,
         )
@@ -806,12 +893,16 @@ def run_phase1(
             )
             print(f"  OR-VARX done in {time.time() - t0:.1f}s, output days: {len(orvarx_result.dates)}")
 
+            # Edge discovery for both: p_max-fit coefficients and SEs from the shared core
+            edge_se = core_results[2][validation_days:]
+
             # Always include learner suffix in directory names
             or_method = f"OR-VARX_{learner_name}"
             oracle_method = f"ORACLE-VARX_{learner_name}"
 
             m = evaluate_and_save(
                 orvarx_result, Y, A_true, or_method, obs_level, RESULTS_DIR, config,
+                edge_coefs=orvarx_result.coefficients, edge_se=edge_se,
                 Y_for_refit=Y, W_for_refit=W_obs_t,
                 learner_name=learner_name, n_jobs=n_jobs, show_plots=show_plots,
             )
@@ -840,6 +931,7 @@ def run_phase1(
             m = evaluate_and_save(
                 oracle_result, Y, A_true, oracle_method, obs_level, RESULTS_DIR, config,
                 coef_result=orvarx_result, coefficients_override=extracted_coefs,
+                edge_coefs=orvarx_result.coefficients, edge_se=edge_se,
                 Y_for_refit=Y, W_for_refit=W_obs_t,
                 learner_name=learner_name, n_jobs=n_jobs, show_plots=show_plots,
             )
@@ -909,9 +1001,14 @@ def run_phase2(
         # Move results back to CPU for evaluation
         Y_cpu = Y.cpu()
 
+        # Edge discovery for both: OR-VARX p_max-fit coefficients, SEs from the same fit
+        edge_coefs = orvarx_result.coefficients.cpu()
+        edge_se = oracle_result.SE_all[-edge_coefs.shape[0]:].cpu()
+
         # OR-VARX-TabPFN
         m = evaluate_and_save(
             orvarx_result, Y_cpu, A_true, "OR-VARX-TabPFN", obs_level, RESULTS_DIR, config,
+            edge_coefs=edge_coefs, edge_se=edge_se,
             Y_for_refit=Y_cpu, W_for_refit=torch.from_numpy(W_obs),
             show_plots=show_plots,
         )
@@ -928,6 +1025,7 @@ def run_phase2(
         m = evaluate_and_save(
             oracle_result, Y_cpu, A_true, "ORACLE-VARX-TabPFN", obs_level, RESULTS_DIR, config,
             coef_result=orvarx_result, coefficients_override=extracted_coefs,
+            edge_coefs=edge_coefs, edge_se=edge_se,
             Y_for_refit=Y_cpu, W_for_refit=torch.from_numpy(W_obs),
             show_plots=show_plots,
         )
@@ -952,7 +1050,7 @@ def main():
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                         help="Device for Phase 2 TabPFN (default: cpu)")
     parser.add_argument("--n-estimators", type=int, default=8,
-                        help="TabPFN ensemble size for Phase 2 (default: 8)")
+                        help="Passed to TabPFNRegressor; no effect on the batched raw forward pass (default: 8)")
     parser.add_argument("--noise-scale", type=float, default=None,
                         help="Innovation noise scale (regenerates data if set)")
     parser.add_argument("--confounder-strength", type=float, default=None,

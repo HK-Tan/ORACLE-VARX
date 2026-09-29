@@ -1,7 +1,9 @@
 -r requirements-cpu.txt
 
 # TabPFN (GPU-based tabular transformer)
-tabpfn>=6.3.2
+# Pinned: src/modules/batched_tabpfn.py calls TabPFN internals (models_, znorm_space_bardist_,
+# the raw transformer forward); newer releases change the default model and architectures.
+tabpfn==6.3.2
 
 # NVIDIA CUDA libraries (pinned for tabpfn compatibility)
 nvidia-cublas-cu12==12.8.4.1

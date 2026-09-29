@@ -6,8 +6,8 @@
 |--------|-------------|:-----:|
 | **VAR** x 1 | Standard Vector Autoregression on endogenous variables only | 0 |
 | **ACLE-VAR** x 1 | VAR with significance-based lag selection (FDR + alpha tuning) | 0 |
-| **VARX** x 3 | VAR with confounders as extra predictors (OLS, no learner) | 0 |
-| **ACLE-VARX** x 3 | VARX with significance-based lag selection | 0 |
+| **VARX** x 3 | VAR with confounders as extra predictors (OLS, no learner); lag chosen on the X, Y, Z equations only | 0 |
+| **ACLE-VARX** x 3 | VARX with significance-based lag selection (lag test on the X, Y, Z block only) | 0 |
 | **OR-VARX** x 3 | Orthogonal VARX — DML first stage partials out confounders | 1 |
 | **ORACLE-VARX** x 3 | OR-VARX plus significance-based lag selection | 1 |
 | **OR-VARX-TabPFN** x 3 | OR-VARX with TabPFN transformer for first-stage nuisance estimation | 2 |

@@ -49,7 +49,14 @@ python scripts/run_toy_benchmark.py --phase 1 --learner lgbm --obs all --no-show
 python scripts/run_toy_benchmark.py --phase 2 --device cuda --no-show
 ```
 
-Results are saved to `results-toy/`.
+Results are saved to `results-toy/`. Each run's `metrics.json` includes the edge FDR, power and F1 of
+stage (iii) BH edge discovery (level q = 0.05). To add these metrics to runs saved before they existed,
+without refitting (older VARX / ACLE-VARX runs did not keep their SEs; rerun phase 0 for those, which
+takes seconds):
+
+```bash
+python scripts/eval_bh_edges.py
+```
 
 ## Further Reading
 

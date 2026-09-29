@@ -194,7 +194,7 @@ class BatchedFoldTabPFN:
         batch rather than multiple estimators.
 
     Attributes:
-        n_estimators: Number of ensemble members (passed to TabPFN internally)
+        n_estimators: Passed to TabPFNRegressor; has no effect on the raw forward pass
         device: PyTorch device for inference
         random_state: Random seed for reproducibility
     """
@@ -208,7 +208,8 @@ class BatchedFoldTabPFN:
         """Initialize the batched fold TabPFN.
 
         Args:
-            n_estimators: Number of ensemble members.
+            n_estimators: Passed to TabPFNRegressor; has no effect on the raw forward
+                pass (see Note).
             device: Device for inference.
             random_state: Random seed.
         """
@@ -229,7 +230,16 @@ class BatchedFoldTabPFN:
 
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=UserWarning)
+            import tabpfn
             from tabpfn import TabPFNRegressor
+
+        # This class calls TabPFN internals (models_, znorm_space_bardist_ and the raw
+        # transformer forward), which later releases change. Fail loudly on other versions.
+        if not tabpfn.__version__.startswith("6.3."):
+            raise ImportError(
+                f"BatchedFoldTabPFN needs tabpfn 6.3.x, found {tabpfn.__version__}. "
+                "Install it with: pip install tabpfn==6.3.2"
+            )
 
         # Create dummy data to trigger model loading
         X_dummy = np.random.randn(10, 5).astype(np.float32)
@@ -247,9 +257,14 @@ class BatchedFoldTabPFN:
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=UserWarning)
             regressor.fit(X_dummy, y_dummy)
+        for attr in ("models_", "znorm_space_bardist_"):
+            if not hasattr(regressor, attr):
+                raise ImportError(f"tabpfn {tabpfn.__version__} has no TabPFNRegressor.{attr}; "
+                                  "install tabpfn==6.3.2")
 
-        # Store ALL raw transformers for true ensemble
-        # TabPFN creates n_estimators models with different preprocessing
+        # models_ holds one transformer per checkpoint (one by default), not one per
+        # ensemble member: n_estimators only sets TabPFN's own preprocessing ensemble,
+        # which this raw forward pass bypasses. So this loop normally runs once.
         for model in regressor.models_:
             self._models.append(model)
             self._bardists.append(regressor.znorm_space_bardist_)

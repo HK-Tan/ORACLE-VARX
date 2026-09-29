@@ -504,7 +504,8 @@ def fit_oraclevarx_tabpfn(
         asset_names: Names of assets
         confounder_names: Names of confounders
         dates: Date strings for forecast days
-        n_estimators: Number of TabPFN ensemble members (default: 8)
+        n_estimators: Passed to TabPFNRegressor (default: 8); has no effect, since
+            BatchedFoldTabPFN runs one raw forward pass without TabPFN's ensemble
         device: Device for TabPFN ('cuda' or 'cpu')
         verbose: Print detailed progress
         target_vram_pct: Fraction of total VRAM to use for batch sizing (default 0.65).

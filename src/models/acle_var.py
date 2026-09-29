@@ -229,6 +229,7 @@ def fit_aclevarx(
     asset_names: Optional[List[str]] = None,
     dates: Optional[List[str]] = None,
     verbose: bool = False,
+    select_on: Optional[List[int]] = None,
 ) -> ACLEVARXResult:
     """Fit ACLE-VARX model: VAR with significance-based p-selection + alpha-selection.
 
@@ -274,6 +275,11 @@ def fit_aclevarx(
         asset_names: Names of assets (default: None, uses A1, A2, ...)
         dates: Date strings for forecast days (default: None, uses indices)
         verbose: If True, print detailed progress
+        select_on: Indices of the series used for lag selection (default: None, all
+                   series). The lag test uses only the select_on x select_on block of
+                   the lag-p coefficients, and alpha is chosen on the forecast errors of
+                   those series. For VARX, pass the endogenous indices so the observed
+                   confounders stacked into Y do not drive lag selection.
 
     Returns:
         ACLEVARXResult with forecasts, alpha_optimal, p_optimal
@@ -337,6 +343,8 @@ def fit_aclevarx(
 
     device = Y.device
     dtype = Y.dtype
+    sel = list(range(n_assets)) if select_on is None else list(select_on)
+    n_sel = len(sel)
 
     print(f"Fitting ACLE-VARX for {n_total_test_days} total test days, "
           f"{n_alphas} alphas, p_max={p_max}")
@@ -382,26 +390,26 @@ def fit_aclevarx(
         # Test each lag p in [2, p_max]
         for p in range(2, p_max + 1):
             # For each day, check if lag p is significant
-            # Extract new lag's coefficients and SEs
-            # Shape: (n_total_test_days, n_assets, n_assets)
-            theta_new = theta_all[:, p - 1, :, :]  # Lag p coefficients
-            SE_new = SE_all[:, p - 1, :, :]
+            # Extract new lag's coefficients and SEs (select_on block only)
+            # Shape: (n_total_test_days, n_sel, n_sel)
+            theta_new = theta_all[:, p - 1][:, sel][:, :, sel]  # Lag p coefficients
+            SE_new = SE_all[:, p - 1][:, sel][:, :, sel]
 
             # Compute z-statistics: z = |theta / SE|
             # Add small epsilon to avoid division by zero
-            z_new = torch.abs(theta_new / (SE_new + 1e-10))  # (n_total_test_days, n_assets, n_assets)
+            z_new = torch.abs(theta_new / (SE_new + 1e-10))  # (n_total_test_days, n_sel, n_sel)
 
             # Compute two-tailed p-values using normal distribution
             # p_val = 2 * (1 - Phi(|z|))
             # Use torch.distributions.Normal for CDF
             normal_dist = torch.distributions.Normal(0, 1)
-            p_vals = 2 * (1 - normal_dist.cdf(z_new))  # (n_total_test_days, n_assets, n_assets)
+            p_vals = 2 * (1 - normal_dist.cdf(z_new))  # (n_total_test_days, n_sel, n_sel)
 
-            # Flatten p-values for each day: (n_total_test_days, n_assets * n_assets)
-            p_vals_flat = p_vals.reshape(n_total_test_days, n_assets * n_assets)
+            # Flatten p-values for each day: (n_total_test_days, n_sel * n_sel)
+            p_vals_flat = p_vals.reshape(n_total_test_days, n_sel * n_sel)
 
             # Apply Benjamini-Hochberg FDR correction (batched over days)
-            # reject: (n_total_test_days, n_assets * n_assets)
+            # reject: (n_total_test_days, n_sel * n_sel)
             reject = batched_benjamini_hochberg(p_vals_flat, alpha)
 
             # Check if any coefficient is significant for each day
@@ -437,9 +445,9 @@ def fit_aclevarx(
     print("  Phase 3: Selecting optimal alpha via ROLLING validation RMSE...")
 
     alpha_optimal, alpha_counts, alpha_percentages, p_optimal_all_days = rolling_alpha_selection(
-        forecasts_all_batched=forecasts_all_batched,
+        forecasts_all_batched=forecasts_all_batched[sel],
         p_alpha_all=p_alpha_all,
-        actuals=actuals,
+        actuals=actuals[:, sel],
         validation_days=validation_days,
         alpha_grid=alpha_grid,
         verbose=True,

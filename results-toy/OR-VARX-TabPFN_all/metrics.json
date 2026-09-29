@@ -24,5 +24,9 @@
   "regime_3_lag_rmse": 1.1058933040759402,
   "overall_lag_rmse": 1.194485712139268,
   "method": "OR-VARX-TabPFN",
-  "obs_level": "all"
+  "obs_level": "all",
+  "edge_fdr": 0.05354045307443366,
+  "edge_power": 0.6661410788381743,
+  "edge_f1": 0.7756679712035561,
+  "edge_n_discovered": 3.3580582524271843
 }

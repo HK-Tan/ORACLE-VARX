@@ -221,12 +221,12 @@ Synthetic data is generated **once** and saved to CSV for reproducibility and ea
 |---|--------|-------------|-----------|--------------|
 | 1 | VAR | No | N/A | `fit_var(Y)` |
 | 2 | ACLE-VAR | No | N/A | `fit_aclevarx(Y)` |
-| 3 | VARX (all) | OLS | all | `fit_var(Y_combined)` slice |
-| 4 | ACLE-VARX (all) | OLS | all | `fit_aclevarx(Y_combined)` slice |
-| 5 | VARX (p2) | OLS | partial_2 | `fit_var(Y_combined)` slice |
-| 6 | ACLE-VARX (p2) | OLS | partial_2 | `fit_aclevarx(Y_combined)` slice |
-| 7 | VARX (p1) | OLS | partial_1 | `fit_var(Y_combined)` slice |
-| 8 | ACLE-VARX (p1) | OLS | partial_1 | `fit_aclevarx(Y_combined)` slice |
+| 3 | VARX (all) | OLS | all | `fit_var(Y_combined, select_on=endo)` slice |
+| 4 | ACLE-VARX (all) | OLS | all | `fit_aclevarx(Y_combined, select_on=endo)` slice |
+| 5 | VARX (p2) | OLS | partial_2 | `fit_var(Y_combined, select_on=endo)` slice |
+| 6 | ACLE-VARX (p2) | OLS | partial_2 | `fit_aclevarx(Y_combined, select_on=endo)` slice |
+| 7 | VARX (p1) | OLS | partial_1 | `fit_var(Y_combined, select_on=endo)` slice |
+| 8 | ACLE-VARX (p1) | OLS | partial_1 | `fit_aclevarx(Y_combined, select_on=endo)` slice |
 
 ### Phase 1 (CPU, parallelizable per obs level): DML methods — 6 runs per learner
 

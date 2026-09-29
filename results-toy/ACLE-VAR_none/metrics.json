@@ -24,5 +24,9 @@
   "regime_3_lag_rmse": 0.6204836822995429,
   "overall_lag_rmse": 1.0059283731418913,
   "method": "ACLE-VAR",
-  "obs_level": "none"
+  "obs_level": "none",
+  "edge_fdr": 0.14680823680823682,
+  "edge_power": 0.6607547169811321,
+  "edge_f1": 0.7298874531054605,
+  "edge_n_discovered": 3.8702702702702703
 }

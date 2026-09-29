@@ -24,5 +24,9 @@
   "regime_3_lag_rmse": 0.8300602387778853,
   "overall_lag_rmse": 1.0643380731612406,
   "method": "ORACLE-VARX-TabPFN",
-  "obs_level": "partial_1"
+  "obs_level": "partial_1",
+  "edge_fdr": 0.16717198335644934,
+  "edge_power": 0.6635684647302904,
+  "edge_f1": 0.7201981535690161,
+  "edge_n_discovered": 3.9436893203883496
 }

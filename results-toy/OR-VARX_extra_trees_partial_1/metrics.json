@@ -24,5 +24,9 @@
   "regime_3_lag_rmse": 1.7386776584519628,
   "overall_lag_rmse": 1.532305832739843,
   "method": "OR-VARX_extra_trees",
-  "obs_level": "partial_1"
+  "obs_level": "partial_1",
+  "edge_fdr": 0.15233009708737863,
+  "edge_power": 0.6615767634854772,
+  "edge_f1": 0.7237732080439422,
+  "edge_n_discovered": 3.875339805825243
 }

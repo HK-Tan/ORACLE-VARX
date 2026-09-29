@@ -6,6 +6,7 @@ and orthogonalized OR-VARX models.
 Key functions:
 - batched_ols: Batched ordinary least squares using torch.linalg.solve
 - batched_benjamini_hochberg: Vectorized Benjamini-Hochberg FDR correction
+- bh_edge_discovery: Per-day BH edge selection over lags 1..p_hat (stage iii)
 """
 
 import torch
@@ -170,3 +171,41 @@ def batched_benjamini_hochberg(p_values: torch.Tensor, alpha: float) -> torch.Te
         reject = reject.squeeze(0)
 
     return reject
+
+
+def bh_edge_discovery(
+    coefficients: torch.Tensor,
+    standard_errors: torch.Tensor,
+    p_hat: torch.Tensor,
+    q: float = 0.05,
+) -> torch.Tensor:
+    """Stage (iii) edge discovery: one BH test per day over lags 1..p_hat.
+
+    For day d, the n * n * p_hat[d] entries with lag <= p_hat[d] get two-sided
+    p-values from z = coef / SE, and Benjamini-Hochberg at level q picks the edges.
+    Entries with lag > p_hat[d] are never edges.
+
+    Args:
+        coefficients: shape (n_days, p_max, n, n); [d, k, i, j] = effect of j at lag k+1 on i
+        standard_errors: same shape as coefficients
+        p_hat: selected lag per day, shape (n_days,), 1-indexed
+        q: BH FDR level
+
+    Returns:
+        edges: boolean tensor, same shape as coefficients
+    """
+    normal = torch.distributions.Normal(0, 1)
+    p_hat = p_hat.long().to(coefficients.device)
+    # Lags beyond p_hat may hold unfitted zeros (0/0), so give them z = 0 before the CDF
+    p_max = coefficients.shape[1]
+    in_lags = torch.arange(p_max, device=coefficients.device).view(1, -1) < p_hat.view(-1, 1)
+    in_lags = in_lags.view(-1, p_max, *([1] * (coefficients.dim() - 2)))
+    z = torch.where(in_lags, (coefficients / standard_errors).abs(), torch.zeros_like(coefficients))
+    p_values = 2 * (1 - normal.cdf(z))
+    edges = torch.zeros_like(p_values, dtype=torch.bool)
+    # Days with the same p_hat share one batched BH call
+    for p in p_hat.unique().tolist():
+        days = p_hat == p
+        reject = batched_benjamini_hochberg(p_values[days, :p].reshape(int(days.sum()), -1), q)
+        edges[days, :p] = reject.reshape(-1, p, *p_values.shape[2:])
+    return edges

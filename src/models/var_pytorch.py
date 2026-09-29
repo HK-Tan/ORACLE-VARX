@@ -480,6 +480,7 @@ def fit_var(
     asset_names: Optional[List[str]] = None,
     dates: Optional[List[str]] = None,
     store_per_p_coefs: bool = False,
+    select_on: Optional[List[int]] = None,
 ) -> VARXResult:
     """Fit plain VAR model with optimal p selection.
 
@@ -499,6 +500,9 @@ def fit_var(
         validation_days: Number of days to use for validation (default: 20)
         asset_names: Names of assets (default: None, uses A1, A2, ...)
         dates: Date strings for forecast days (default: None, uses indices)
+        select_on: Indices of the series whose forecast errors choose p (default: None,
+                   all series). For VARX, pass the endogenous indices so the observed
+                   confounders stacked into Y do not drive lag selection.
 
     Returns:
         VARXResult with forecasts, coefficients, and metadata
@@ -559,8 +563,9 @@ def fit_var(
     # Step 2: Extract actual returns for test period
     actuals = Y[lookback:, :]  # (n_test_days, n_assets)
 
-    # Step 3: Select optimal p based on validation RMSE
-    p_optimal = select_optimal_p(forecasts_all, actuals, validation_days)
+    # Step 3: Select optimal p based on validation RMSE (on the select_on series only)
+    sel = list(range(n_assets)) if select_on is None else list(select_on)
+    p_optimal = select_optimal_p(forecasts_all[:, sel], actuals[:, sel], validation_days)
 
     # Step 4: Extract forecasts at optimal p for each day
     # Slice forecasts_all to output days only
