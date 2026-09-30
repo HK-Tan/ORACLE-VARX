@@ -215,10 +215,10 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
     SE_all = torch.zeros(n_total_test_days, p_max, n_assets, n_assets,
                          dtype=dtype)
 
-    per_p_coefs = None
-    if store_per_p_coefs:
-        per_p_coefs = torch.zeros(n_total_test_days, p_max, p_max, n_assets, n_assets,
-                                  dtype=dtype)
+    # per_p_coefs[day, p-1, :p] holds the lag-p fit. Always built: Phase 5
+    # forecasts at lag p with it. theta_all ends up holding the p_max fit.
+    per_p_coefs = torch.zeros(n_total_test_days, p_max, p_max, n_assets, n_assets,
+                              dtype=dtype)
 
     for p in range(1, p_max + 1):
         if p not in R_Y_all:
@@ -263,8 +263,7 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
                 if 0 <= day_rel_idx < n_total_test_days:
                     reshaped = theta_cpu[i].view(p, n_assets, n_assets).transpose(-2, -1)
                     theta_all[day_rel_idx, :p, :, :] = reshaped
-                    if per_p_coefs is not None:
-                        per_p_coefs[day_rel_idx, p - 1, :p, :, :] = reshaped
+                    per_p_coefs[day_rel_idx, p - 1, :p, :, :] = reshaped
                     SE_all[day_rel_idx, :p, :, :] = \
                         se_batch[i].view(p, n_assets, n_assets).transpose(-2, -1)
 
@@ -280,9 +279,7 @@ def _run_ols_phase4(R_Y_all, R_T_all, first_residual_row,
             torch.cuda.empty_cache()
 
     # Return as numpy — already on CPU
-    if store_per_p_coefs:
-        return theta_all.numpy(), SE_all.numpy(), per_p_coefs.numpy()
-    return theta_all.numpy(), SE_all.numpy()
+    return theta_all.numpy(), SE_all.numpy(), per_p_coefs.numpy()
 
 
 def _build_lagged_features(
@@ -839,43 +836,17 @@ def fit_oraclevarx_tabpfn(
         R_T_all[p] = R_T
         first_residual_row[p] = first_row
 
-        # Run separate batches for forecast predictions, grouped by forecast size
-        folds_by_forecast_size: Dict[int, List[int]] = {}
+        # Forecast nuisances E[Y|W], E[T|W] for each test day. The forecast
+        # controls for day t are the lagged W of test row t, so these are the
+        # test-pass predictions; reuse them instead of a second TabPFN pass.
         for fold_idx, fold in enumerate(folds_p):
-            forecast_size = len(fold['forecast_controls'])
-            if forecast_size not in folds_by_forecast_size:
-                folds_by_forecast_size[forecast_size] = []
-            folds_by_forecast_size[forecast_size].append(fold_idx)
-
-        Y_forecast_all = [None] * n_folds_p
-        T_forecast_all = [None] * n_folds_p
-
-        for forecast_size, fold_indices in folds_by_forecast_size.items():
-            if forecast_size == 0:
-                continue
-
-            X_trains_group = [folds_p[i]['X_train'] for i in fold_indices]
-            Y_trains_Y_group = [folds_p[i]['Y_train'] for i in fold_indices]
-            Y_trains_T_group = [folds_p[i]['T_train'] for i in fold_indices]
-            X_forecast_group = [np.array(folds_p[i]['forecast_controls'], dtype=np.float32) for i in fold_indices]
-
-            # Run batched TabPFN for forecast predictions
-            Y_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_Y_group, X_forecast_group, effective_batch_size)
-            _clear_gpu_memory()
-            T_forecast_group = tabpfn.fit_predict_batch(X_trains_group, Y_trains_T_group, X_forecast_group, effective_batch_size)
-            _clear_gpu_memory()
-
-            for group_idx, fold_idx in enumerate(fold_indices):
-                Y_forecast_all[fold_idx] = Y_forecast_group[group_idx]
-                T_forecast_all[fold_idx] = T_forecast_group[group_idx]
-
-        # Map forecast predictions to absolute day indices
-        for fold_idx, fold in enumerate(folds_p):
-            if Y_forecast_all[fold_idx] is None:
-                continue
+            assert np.array_equal(np.asarray(fold['forecast_controls'], dtype=np.float32),
+                                  fold['X_test'])
+            assert len(fold['forecast_day_indices']) == Y_preds_all[fold_idx].shape[0]
             for local_idx, day_idx in enumerate(fold['forecast_day_indices']):
-                forecast_Y_preds[p][day_idx] = Y_forecast_all[fold_idx][local_idx]
-                forecast_T_preds[p][day_idx] = T_forecast_all[fold_idx][local_idx]
+                assert day_idx == fold['test_start'] + local_idx
+                forecast_Y_preds[p][day_idx] = Y_preds_all[fold_idx][local_idx]
+                forecast_T_preds[p][day_idx] = T_preds_all[fold_idx][local_idx]
 
         if verbose:
             p_elapsed = time.time() - p_start_time
@@ -976,17 +947,16 @@ def fit_oraclevarx_tabpfn(
             store_per_p_coefs=store_per_p_coefs,
         )
 
-    theta_np, SE_np = ols_result[0], ols_result[1]
-    per_p_coefs_np = ols_result[2] if len(ols_result) > 2 else None
+    theta_np, SE_np, per_p_coefs_np = ols_result
 
     # Convert results to GPU tensors for Phase 5
     theta_all = torch.from_numpy(theta_np).to(device=dev, dtype=dtype)
     SE_all = torch.from_numpy(SE_np).to(device=dev, dtype=dtype)
+    per_p_full = torch.from_numpy(per_p_coefs_np).to(device=dev, dtype=dtype)
 
     per_p_coefs_tensor = None
-    if per_p_coefs_np is not None:
-        per_p_coefs_tensor = torch.from_numpy(per_p_coefs_np).to(device=dev, dtype=dtype)
-        per_p_coefs_tensor = per_p_coefs_tensor[validation_days:]  # trim to output days
+    if store_per_p_coefs:
+        per_p_coefs_tensor = per_p_full[validation_days:]  # trim to output days
     forecasts_all = torch.zeros(n_total_test_days, n_assets, p_max,
                                 device=dev, dtype=dtype)
 
@@ -1015,15 +985,18 @@ def fit_oraclevarx_tabpfn(
         for day_rel_idx in range(n_total_test_days):
             day_idx = lookback + day_rel_idx
 
+            # Lag-p fit for this day (theta_all holds the p_max fit, not this one)
+            theta_p = per_p_full[day_rel_idx, p - 1, :p, :, :]
+
             # Check if we have valid theta for this day
-            if theta_all[day_rel_idx, p-1].abs().sum() == 0:
+            if theta_p[p - 1].abs().sum() == 0:
                 continue
 
             # Check if we have forecast predictions for this day
             if day_idx not in forecast_Y_preds[p] or day_idx not in forecast_T_preds[p]:
                 continue
 
-            theta = theta_all[day_rel_idx, :p, :, :].transpose(-2, -1).reshape(n_treatments, n_assets)
+            theta = theta_p.transpose(-2, -1).reshape(n_treatments, n_assets)
 
             # Get exact E[Y|W] and E[T|W] from Phase 3
             E_Y_given_W = torch.from_numpy(forecast_Y_preds[p][day_idx]).to(device=dev, dtype=dtype)
