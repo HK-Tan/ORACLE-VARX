@@ -315,7 +315,7 @@ For each (method, observability) run, saved to `results-toy/{method}_{obs_level}
 - `heatmap_last_day.png` — coefficient heatmap at the last output day
 - `coef_evolution_max_p.png` — per-p refit grid at max_p day
 - `coef_evolution_last_day.png` — per-p refit grid at last day
-- `metrics.json` — edge_mae, edge_mse, zero_edge_mae, forecast_mae, forecast_mse (by regime)
+- `metrics.json` — edge_mae, edge_mse, forecast_mae, forecast_mse (by regime)
 - `result.pt` — saved result object
 
 Top-level outputs in `results-toy/`:

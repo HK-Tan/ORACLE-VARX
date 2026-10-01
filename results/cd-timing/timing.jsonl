@@ -1,0 +1,15 @@
+{"dataset": "toy", "method": "parcorr", "N": 6, "T_w": 200, "p_max": 5, "end": 250, "seconds": 0.16781712509691715, "n_links": 22}
+{"dataset": "toy", "method": "parcorr", "N": 6, "T_w": 200, "p_max": 5, "end": 1625, "seconds": 0.15506949997507036, "n_links": 15}
+{"dataset": "toy", "method": "parcorr", "N": 6, "T_w": 200, "p_max": 5, "end": 3000, "seconds": 0.1570681668817997, "n_links": 16}
+{"dataset": "toy", "method": "varlingam", "N": 6, "T_w": 200, "p_max": 5, "end": 250, "seconds": 0.022514207987114787}
+{"dataset": "toy", "method": "varlingam", "N": 6, "T_w": 200, "p_max": 5, "end": 1625, "seconds": 0.022883165860548615}
+{"dataset": "toy", "method": "varlingam", "N": 6, "T_w": 200, "p_max": 5, "end": 3000, "seconds": 0.021829375065863132}
+{"dataset": "etf", "method": "parcorr", "N": 19, "T_w": 504, "p_max": 10, "end": 554, "seconds": 4.388342374935746, "n_links": 145}
+{"dataset": "etf", "method": "parcorr", "N": 19, "T_w": 504, "p_max": 10, "end": 2916, "seconds": 5.780520583037287, "n_links": 208}
+{"dataset": "etf", "method": "parcorr", "N": 19, "T_w": 504, "p_max": 10, "end": 5279, "seconds": 9.089147333055735, "n_links": 412}
+{"dataset": "etf", "method": "varlingam", "N": 19, "T_w": 504, "p_max": 10, "end": 554, "seconds": 9.073183750035241}
+{"dataset": "etf", "method": "varlingam", "N": 19, "T_w": 504, "p_max": 10, "end": 2916, "seconds": 14.673824457917362}
+{"dataset": "etf", "method": "varlingam", "N": 19, "T_w": 504, "p_max": 10, "end": 5279, "seconds": 14.501029249979183}
+{"dataset": "toy", "method": "cmiknn", "N": 6, "T_w": 200, "p_max": 5, "end": 250, "seconds": 372.0173953329213, "n_links": 11}
+{"dataset": "toy", "method": "cmiknn", "N": 6, "T_w": 200, "p_max": 5, "end": 1625, "seconds": 392.28422383381985, "n_links": 21}
+{"dataset": "toy", "method": "cmiknn", "N": 6, "T_w": 200, "p_max": 5, "end": 3000, "seconds": 393.7272035002243, "n_links": 15}

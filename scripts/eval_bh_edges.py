@@ -12,8 +12,13 @@ metrics.json and into metrics_summary.csv.
 
 Usage (from code/):
     python scripts/eval_bh_edges.py
+    python scripts/eval_bh_edges.py --all-lags   # diagnostic, writes nothing
+
+--all-lags runs BH over all p_max lags on every day instead of lags 1..p_hat (the
+range PCMCI tests) and only prints the metrics; the saved metrics are left unchanged.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -45,6 +50,10 @@ def load_result(name: str):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--all-lags", action="store_true",
+                    help="BH over all p_max lags; print only, do not write metrics")
+    all_lags = ap.parse_args().all_lags
     _, _, A_true, dgp_config = load_toy_data()
     window = dgp_config["ols_window"]
 
@@ -63,9 +72,14 @@ def main():
         se = res_acle["SE_all"][-coefs.shape[0]:]  # SE_all also covers the validation days
 
         for name, res in [(base, res_base), (acle, res_acle)]:
-            bh = compute_bh_edge_metrics(
-                coefs, se, res["p_optimal"], res["dates"], A_true, window
-            )
+            p_hat = torch.as_tensor(res["p_optimal"])
+            if all_lags:
+                p_hat = torch.full_like(p_hat, coefs.shape[1])
+            bh = compute_bh_edge_metrics(coefs, se, p_hat, res["dates"], A_true, window)
+            if all_lags:
+                print(f"  {name}_{obs:10s} all lags: FDR={bh['edge_fdr']:.3f}  "
+                      f"power={bh['edge_power']:.3f}  F1={bh['edge_f1']:.3f}")
+                continue
             metrics_path = RESULTS_DIR / f"{name}_{obs}" / "metrics.json"
             with open(metrics_path) as f:
                 metrics = json.load(f)

@@ -1,0 +1,34 @@
+{
+ "method": "pcmci",
+ "obs_level": "none",
+ "n_days": 2775,
+ "wall_seconds": 82.03000749996863,
+ "n_proc": 6,
+ "mean_p_hat": 1.4781981981981982,
+ "scored": {
+  "T225": {
+   "overall_nonzero_mae": 0.06899012625217438,
+   "overall_nonzero_mse": 0.008007257245481014,
+   "overall_forecast_mae": 0.1093198705063645,
+   "overall_forecast_mse": 0.019850340904525428,
+   "overall_lag_rmse": 1.122898437482616,
+   "spearman_rho": 0.5625692020269826,
+   "edge_fdr": 0.062337194337194334,
+   "edge_power": 0.6766792452830188,
+   "edge_f1": 0.7800591613015485,
+   "edge_n_discovered": 3.5091891891891893
+  },
+  "T425": {
+   "overall_nonzero_mae": 0.06568051129579544,
+   "overall_nonzero_mse": 0.0069906809367239475,
+   "overall_forecast_mae": 0.10910744032839004,
+   "overall_forecast_mse": 0.01982339736484581,
+   "overall_lag_rmse": 1.1361662670611934,
+   "spearman_rho": 0.4896836877083404,
+   "edge_fdr": 0.06624687933425798,
+   "edge_power": 0.6725311203319502,
+   "edge_f1": 0.7749832647986994,
+   "edge_n_discovered": 3.4423300970873787
+  }
+ }
+}

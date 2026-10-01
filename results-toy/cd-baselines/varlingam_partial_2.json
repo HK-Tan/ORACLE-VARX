@@ -1,0 +1,34 @@
+{
+ "method": "varlingam",
+ "obs_level": "partial_2",
+ "n_days": 2775,
+ "wall_seconds": 20.46097504114732,
+ "n_proc": 6,
+ "mean_p_hat": 1.0,
+ "scored": {
+  "T225": {
+   "overall_nonzero_mae": 0.07857027649879456,
+   "overall_nonzero_mse": 0.01034999918192625,
+   "overall_forecast_mae": 0.10857818161452414,
+   "overall_forecast_mse": 0.019639990038710822,
+   "overall_lag_rmse": 1.2155153135512022,
+   "spearman_rho": NaN,
+   "edge_fdr": 0.20600772200772202,
+   "edge_power": 0.6283018867924528,
+   "edge_f1": 0.6858343287885652,
+   "edge_n_discovered": 3.9736936936936935
+  },
+  "T425": {
+   "overall_nonzero_mae": 0.07097218930721283,
+   "overall_nonzero_mse": 0.008168485946953297,
+   "overall_forecast_mae": 0.10824509653566014,
+   "overall_forecast_mse": 0.019606151993648253,
+   "overall_lag_rmse": 1.1320571531765755,
+   "spearman_rho": NaN,
+   "edge_fdr": 0.19587239944521498,
+   "edge_power": 0.6410788381742739,
+   "edge_f1": 0.6972965654195064,
+   "edge_n_discovered": 3.9250485436893205
+  }
+ }
+}

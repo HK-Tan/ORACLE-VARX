@@ -1,0 +1,6 @@
+-r requirements-cpu.txt
+
+# Causal-discovery baselines (scripts/run_cd_baselines.py, scripts/time_cd_baselines.py)
+tigramite==5.2.10.1
+lingam==1.13.0
+numba>=0.60

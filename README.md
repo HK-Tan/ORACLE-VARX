@@ -58,6 +58,27 @@ takes seconds):
 python scripts/eval_bh_edges.py
 ```
 
+### 3. Causal-Discovery Baselines (`scripts/run_cd_baselines.py`, `scripts/time_cd_baselines.py`)
+
+Rolling-window PCMCI (tigramite, ParCorr test) and VAR-LiNGAM (lingam) on the toy benchmark, refit
+on every output day and scored with the toy benchmark's own metrics (edge FDR/power/F1 through the
+same BH step, lag recovery, and for VAR-LiNGAM also coefficients and forecasts). The timing script
+measures seconds per window on the toy data and on the ETF data with the `all10` confounders.
+
+```bash
+pip install -r requirements-cd.txt
+
+# Accuracy: both methods at the 4 observability levels (a few minutes on 8 cores)
+python scripts/run_cd_baselines.py
+
+# Timing: seconds per window (CMIknn takes minutes to hours per window; cap it)
+python scripts/time_cd_baselines.py --dataset toy --method parcorr --n-windows 3
+python scripts/time_cd_baselines.py --dataset etf --method cmiknn --n-windows 1 --max-seconds 3600
+```
+
+Results are saved to `results-toy/cd-baselines/` (accuracy) and `results/cd-timing/timing.jsonl`
+(timing).
+
 ## Further Reading
 
 For detailed execution guides, CLI references, confounder presets, output structure, and EC2/GPU setup instructions, see `docs/`:

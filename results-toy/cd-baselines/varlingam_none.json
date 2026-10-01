@@ -1,0 +1,34 @@
+{
+ "method": "varlingam",
+ "obs_level": "none",
+ "n_days": 2775,
+ "wall_seconds": 12.982661375077441,
+ "n_proc": 6,
+ "mean_p_hat": 1.0007207207207207,
+ "scored": {
+  "T225": {
+   "overall_nonzero_mae": 0.0779256522655487,
+   "overall_nonzero_mse": 0.01029700506478548,
+   "overall_forecast_mae": 0.10941954073813975,
+   "overall_forecast_mse": 0.01984964719731856,
+   "overall_lag_rmse": 1.2146255864731796,
+   "spearman_rho": 0.03564414463136749,
+   "edge_fdr": 0.22428056628056625,
+   "edge_power": 0.6284528301886793,
+   "edge_f1": 0.6793114700603687,
+   "edge_n_discovered": 4.05981981981982
+  },
+  "T425": {
+   "overall_nonzero_mae": 0.07030525803565979,
+   "overall_nonzero_mse": 0.008100729435682297,
+   "overall_forecast_mae": 0.10907435931191459,
+   "overall_forecast_mse": 0.019791958039156378,
+   "overall_lag_rmse": 1.1320571531765755,
+   "spearman_rho": NaN,
+   "edge_fdr": 0.21635783633841885,
+   "edge_power": 0.6410788381742739,
+   "edge_f1": 0.6895474426492905,
+   "edge_n_discovered": 4.021747572815534
+  }
+ }
+}

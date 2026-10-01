@@ -145,7 +145,7 @@ def compute_edge_metrics(
         p_max_true: true maximum lag (3)
 
     Returns:
-        Dict with MAE/MSE on non-zero and zero edges, by regime and overall.
+        Dict with MAE/MSE on the true non-zero edges, by regime and overall.
     """
     n_days = result_coefs.shape[0]
     p_compare = min(result_coefs.shape[1], p_max_true)
@@ -156,9 +156,8 @@ def compute_edge_metrics(
     time_indices = np.array([parse_time_index(d) for d in result_dates])
     true = A_true.numpy()[time_indices][:, :p_compare, :, :]
 
-    # Masks for non-zero and zero true edges (per time step)
+    # Mask of the true non-zero edges (per time step)
     nonzero_mask = np.abs(true) > 1e-8
-    zero_mask = ~nonzero_mask
 
     regimes = [(0, 1000), (1000, 2000), (2000, 3000)]
     metrics = {}
@@ -171,23 +170,18 @@ def compute_edge_metrics(
         e_r = est[in_regime]
         t_r = true[in_regime]
         nz_r = nonzero_mask[in_regime]
-        z_r = zero_mask[in_regime]
 
         rname = f"regime_{regime_idx + 1}"
         if nz_r.any():
             diff_nz = e_r[nz_r] - t_r[nz_r]
             metrics[f"{rname}_nonzero_mae"] = float(np.mean(np.abs(diff_nz)))
             metrics[f"{rname}_nonzero_mse"] = float(np.mean(diff_nz**2))
-        if z_r.any():
-            metrics[f"{rname}_zero_mae"] = float(np.mean(np.abs(e_r[z_r])))
 
     # Overall
     if nonzero_mask.any():
         diff_all = est[nonzero_mask] - true[nonzero_mask]
         metrics["overall_nonzero_mae"] = float(np.mean(np.abs(diff_all)))
         metrics["overall_nonzero_mse"] = float(np.mean(diff_all**2))
-    if zero_mask.any():
-        metrics["overall_zero_mae"] = float(np.mean(np.abs(est[zero_mask])))
 
     return metrics
 
@@ -459,7 +453,7 @@ def append_metrics_summary(metrics: Dict, output_dir: Path) -> None:
     """Append a single metrics row to the summary CSV, replacing if method+obs already exists."""
     csv_path = output_dir / "metrics_summary.csv"
     summary_cols = ["method", "obs_level",
-                    "overall_nonzero_mae", "overall_nonzero_mse", "overall_zero_mae",
+                    "overall_nonzero_mae", "overall_nonzero_mse",
                     "overall_forecast_mae", "overall_forecast_mse", "overall_lag_rmse",
                     "spearman_rho", "edge_fdr", "edge_power", "edge_f1"]
     row = {c: metrics.get(c) for c in summary_cols}

@@ -253,7 +253,7 @@ All results are saved under `results-toy/`:
 | File | Contents |
 |------|----------|
 | `result.pt` | Saved result object (forecasts, coefficients, etc.) |
-| `metrics.json` | Edge MAE/MSE, zero-edge MAE, forecast MAE/MSE (by regime) |
+| `metrics.json` | Edge MAE/MSE (true non-zero edges), forecast MAE/MSE (by regime) |
 | `edge_trajectories.png` | True vs estimated coefficient trajectories (6 edges) |
 | `lag_analysis.png` | Optimal lag order (p) over time |
 | `forecast_error_mse.png` | Rolling MSE vs time with regime boundaries |
