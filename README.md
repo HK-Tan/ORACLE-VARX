@@ -13,6 +13,17 @@ pip install -r requirements-cpu.txt   # CPU (tree-based learners)
 pip install -r requirements-gpu.txt   # GPU (adds TabPFN + CUDA)
 ```
 
+## Data
+
+The synthetic benchmark data are in `dataset/toy/`. For the ETF experiment, `dataset/` holds the confounder series, all downloaded from FRED (Federal Reserve Bank of St. Louis, https://fred.stlouisfed.org). VIXCLS and GVZCLS are copyright Chicago Board Options Exchange, Inc., reprinted with permission.
+
+Two input files are **not included**, because their licences do not allow redistribution:
+
+- `dataset/OPCL_20000103_20201231.csv`: daily open-to-close log returns, log(close / open), from CRSP (Center for Research in Security Prices). With CRSP access, build it from the daily stock file (open price `OPENPRC`, close price `|PRC|`). Format: a first column `ticker`, then one column per trading day named `XYYYYMMDD` (e.g. `X20000103`), from 2000-01-03 to 2020-12-31. The experiments need the nine sector ETFs (XLY, XLP, XLE, XLF, XLV, XLI, XLB, XLK, XLU) and SPY.
+- `dataset/BAMLC0A4CBBB_20000103_20201231.csv`: the ICE BofA BBB US Corporate Index option-adjusted spread (ICE Data Indices, LLC). Since April 2026 FRED serves only its last three years, so the full history needs ICE access. Format: columns `observation_date` and `BAMLC0A4CBBB`, like the other confounder files. Only the `all10` confounder set uses it.
+
+The ETF results reported in the paper are kept in `results/`, so they can be checked without these files.
+
 ## Experiments
 
 The two main experiment scripts are:

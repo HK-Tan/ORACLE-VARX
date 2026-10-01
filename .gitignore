@@ -43,3 +43,6 @@ results/**/results.pt*
 
 ## Documentation
 tex-files/
+# Licensed data, not redistributable (see README "Data")
+dataset/OPCL_20000103_20201231.csv
+dataset/BAMLC0A4CBBB_20000103_20201231.csv
